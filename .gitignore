@@ -48,6 +48,6 @@ nohup.out
 run_full_experiment.sh
 full_experiment.log
 
-# Large model files and checkpoints
-models/
-checkpoints/
+# Large model files and checkpoints (only top-level, not src/models/)
+/models/
+/checkpoints/
