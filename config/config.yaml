@@ -1,0 +1,197 @@
+# Hyrax Acoustic Representation Learning - Configuration File
+
+# Project paths
+paths:
+  data_dir: "Data"
+  processed_dir: "Data/processed"
+  output_dir: "outputs"
+  figures_dir: "outputs/figures"
+  embeddings_dir: "outputs/embeddings"
+  reports_dir: "outputs/reports"
+
+# Dataset configurations
+datasets:
+  macaque:
+    name: "Macaque Vocalizations"
+    path: "Data/Macaque"
+    individuals: ["AL", "BE", "IO", "MU", "QU", "SN", "TH", "TW"]
+    type: "individual_identification"
+
+  zebra_finch:
+    name: "Zebra Finch Vocalizations"
+    path: "Data/Zebra finch"
+    subdirs:
+      adult: "AdultVocalizations"
+      chick: "ChickVocalizations"
+    type: "individual_and_call_type"
+
+# Subset creation (for initial experiments)
+subset:
+  enabled: true
+  samples_per_individual: 20  # Number of samples to select per individual
+  random_seed: 42
+  stratified: true  # Ensure balanced sampling
+
+# Audio preprocessing
+preprocessing:
+  target_sample_rate: 16000  # Required by wav2vec models
+  channels: 1  # Convert to mono
+  normalize: true
+  trim_silence: false  # Can be enabled if needed
+  silence_threshold: 0.01
+  min_duration: 0.1  # Minimum duration in seconds
+  max_duration: 10.0  # Maximum duration in seconds
+
+# Model configurations
+models:
+  wav2vec2_base:
+    name: "wav2vec2-base-960h"
+    model_id: "facebook/wav2vec2-base-960h"
+    num_layers: 12
+    hidden_size: 768
+    description: "Pretrained on English LibriSpeech (960h)"
+
+  wav2vec2_xlsr:
+    name: "wav2vec2-xls-r-300m"
+    model_id: "facebook/wav2vec2-xls-r-300m"
+    num_layers: 24
+    hidden_size: 1024
+    description: "Multilingual model trained on 128 languages"
+
+# Feature extraction settings
+feature_extraction:
+  batch_size: 8
+  extract_all_layers: true  # Extract from all transformer layers
+  layers_to_extract: null  # If null, extract all layers; otherwise specify list [0, 6, 11]
+  device: "cpu"  # "cuda" if GPU available, "mps" for Apple Silicon
+  return_attention: false
+
+# Pooling strategies
+pooling:
+  default: "mean"  # Default pooling method
+  methods:
+    - "mean"        # Average over time dimension
+    - "max"         # Max over time dimension
+    - "first"       # First token
+    - "last"        # Last token
+  # Weighted pooling can be added later
+
+# Dimensionality reduction and visualization
+visualization:
+  methods:
+    pca:
+      enabled: true
+      n_components: 2
+      whiten: false
+
+    lda:
+      enabled: true
+      n_components: 2  # Will be min(n_classes-1, n_features)
+
+    tsne:
+      enabled: true
+      n_components: 2
+      perplexity: 30
+      learning_rate: 200
+      n_iter: 1000
+      random_state: 42
+
+    umap:
+      enabled: true
+      n_components: 2
+      n_neighbors: 15
+      min_dist: 0.1
+      metric: "cosine"
+      random_state: 42
+
+  # Plot settings
+  figure_size: [10, 8]
+  dpi: 300
+  format: "png"
+  style: "seaborn-v0_8-darkgrid"
+  color_palette: "tab10"
+  marker_size: 50
+  alpha: 0.7
+
+# k-NN Classification
+knn:
+  enabled: true
+  n_neighbors: [3, 5, 7, 9]  # Test multiple k values
+  metric: "cosine"  # Distance metric
+  cv_folds: 5  # Cross-validation folds
+  test_size: 0.2  # Train-test split
+  random_state: 42
+
+# Linear Probe Classification
+linear_probe:
+  enabled: true
+  regularization_strengths: [0.001, 0.01, 0.1, 1.0, 10.0]  # C values to test
+  max_iter: 1000
+  solver: 'lbfgs'  # or 'saga' for very large datasets
+  cv_folds: 5
+  test_size: 0.2
+  random_state: 42
+  multi_class: 'multinomial'  # or 'ovr' for one-vs-rest
+
+# Logistic Regression Classification
+logistic_regression:
+  enabled: true
+  regularization_strengths: [0.001, 0.01, 0.1, 1.0, 10.0]
+  max_iter: 1000
+  solver: 'lbfgs'
+  cv_folds: 5
+  test_size: 0.2
+  random_state: 42
+  multi_class: 'multinomial'
+
+# Evaluation metrics
+metrics:
+  enabled:
+    - "accuracy"
+    - "balanced_accuracy"
+    - "macro_f1"
+    - "macro_precision"
+    - "macro_recall"
+    - "per_class_f1"
+
+# Layer comparison settings
+layer_comparison:
+  enabled: true
+  metrics:
+    # Classification metrics
+    - "knn_accuracy"
+    - "knn_balanced_accuracy"
+    - "knn_macro_f1"
+    - "linear_probe_accuracy"
+    - "linear_probe_balanced_accuracy"
+    - "linear_probe_macro_f1"
+    - "logreg_accuracy"
+    - "logreg_balanced_accuracy"
+    - "logreg_macro_f1"
+    # Clustering metrics
+    - "silhouette_score"
+    - "calinski_harabasz_score"
+    - "davies_bouldin_score"
+
+# Experiment tracking
+experiment:
+  name: "baseline_experiment"
+  description: "Initial wav2vec representation quality experiment"
+  save_embeddings: true
+  save_visualizations: true
+  save_metrics: true
+  log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+
+# Reproducibility
+random_seed: 42
+
+# Memory management
+memory:
+  enable_monitoring: true  # Log memory usage during evaluation
+  enable_garbage_collection: true  # Explicit GC after each dataset
+  max_memory_mb: 8000  # Warning threshold (8GB)
+
+# Computational settings
+computation:
+  n_jobs: -1  # Use all available cores for parallel processing
+  verbose: 1

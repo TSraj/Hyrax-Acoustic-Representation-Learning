@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude AI folders and files
+.claude/
+
+# Project outputs (from running scripts)
+outputs/
+Data/processed/
+*.npz
+*.pkl
+*.pt
+*.pth
+
+# Raw data (too large for git)
+Data/Macaque/
+Data/Zebra finch/
+Data/*/
+
+# Logs and run scripts
+*.log
+nohup.out
+run_full_experiment.sh
+full_experiment.log
+
+# Large model files and checkpoints
+models/
+checkpoints/
