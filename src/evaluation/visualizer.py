@@ -197,7 +197,7 @@ class EmbeddingVisualizer:
                 linewidths=0.5
             )
 
-        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.set_title(title, fontsize=14, fontweight='bold', pad=12)
         ax.set_xlabel('Component 1', fontsize=12)
         ax.set_ylabel('Component 2', fontsize=12)
 
@@ -207,7 +207,8 @@ class EmbeddingVisualizer:
                 title=legend_title,
                 bbox_to_anchor=(1.05, 1),
                 loc='upper left',
-                fontsize=9
+                fontsize=9,
+                framealpha=0.9
             )
         else:
             # Too many labels, skip legend
@@ -369,14 +370,19 @@ class EmbeddingVisualizer:
         for idx in range(n_layers, len(axes)):
             axes[idx].axis('off')
 
-        # Add legend
+        # Add suptitle first - reserve more space for two-line title
+        fig.suptitle(f"{model_name} - Layer Comparison ({method.upper()})\n{dataset_name}",
+                     fontsize=14, fontweight='bold', y=0.99)
+
+        # Call tight_layout FIRST to position subplots, then add legend outside
+        plt.tight_layout(rect=[0, 0, 0.95, 0.94])  # Leave 5% on right for legend, 6% on top for title
+
+        # Add legend AFTER tight_layout - position outside plot area on the right
         if n_labels <= 20:
             handles, labels_legend = axes[0].get_legend_handles_labels()
-            fig.legend(handles, labels_legend, loc='upper right', bbox_to_anchor=(0.99, 0.99), fontsize=9)
-
-        fig.suptitle(f"{model_name} - Layer Comparison ({method.upper()})\n{dataset_name}",
-                     fontsize=16, fontweight='bold')
-        plt.tight_layout()
+            fig.legend(handles, labels_legend, loc='center left',
+                      bbox_to_anchor=(0.96, 0.5), fontsize=8, framealpha=0.95,
+                      title='Individual', title_fontsize=9)
 
         # Save
         output_file = Path(output_path)

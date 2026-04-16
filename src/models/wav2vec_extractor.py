@@ -1,5 +1,5 @@
 """
-Wav2Vec feature extractor for extracting layer-wise representations.
+Wav2Vec and HuBERT feature extractor for extracting layer-wise representations.
 """
 
 import torch
@@ -7,14 +7,14 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from tqdm import tqdm
-from transformers import Wav2Vec2Model, Wav2Vec2FeatureExtractor
+from transformers import Wav2Vec2Model, Wav2Vec2FeatureExtractor, HubertModel
 
 from src.utils.audio_utils import load_audio
 from src.utils.logging_utils import setup_logger
 
 
 class Wav2VecFeatureExtractor:
-    """Extracts features from audio using pretrained Wav2Vec models."""
+    """Extracts features from audio using pretrained Wav2Vec and HuBERT models."""
 
     def __init__(
         self,
@@ -24,10 +24,10 @@ class Wav2VecFeatureExtractor:
         log_level: str = "INFO"
     ):
         """
-        Initialize Wav2Vec feature extractor.
+        Initialize Wav2Vec/HuBERT feature extractor.
 
         Args:
-            model_name: Name of the model ('wav2vec2_base' or 'wav2vec2_xlsr')
+            model_name: Name of the model (e.g., 'wav2vec2_base', 'hubert_base')
             config: Configuration dictionary
             device: Device to run model on ('cpu', 'cuda', or 'mps')
             log_level: Logging level
@@ -40,6 +40,7 @@ class Wav2VecFeatureExtractor:
         self.model_config = config['models'][model_name]
         self.model_id = self.model_config['model_id']
         self.num_layers = self.model_config['num_layers']
+        self.model_type = self.model_config.get('model_type', 'wav2vec2')  # Default to wav2vec2
 
         # Set device
         if device is None:
@@ -55,13 +56,19 @@ class Wav2VecFeatureExtractor:
         self.logger.info(f"Using device: {self.device}")
 
         # Load model and feature extractor
-        self.logger.info(f"Loading model: {self.model_id}")
+        self.logger.info(f"Loading {self.model_type} model: {self.model_id}")
         self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(self.model_id)
-        self.model = Wav2Vec2Model.from_pretrained(self.model_id)
+
+        # Load appropriate model based on type
+        if self.model_type == 'hubert':
+            self.model = HubertModel.from_pretrained(self.model_id)
+        else:
+            self.model = Wav2Vec2Model.from_pretrained(self.model_id)
+
         self.model.to(self.device)
         self.model.eval()
 
-        self.logger.info(f"Model loaded successfully: {self.model_name}")
+        self.logger.info(f"Model loaded successfully: {self.model_name} ({self.model_type})")
 
     def extract_features_from_audio(
         self,

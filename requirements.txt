@@ -21,6 +21,9 @@ umap-learn>=0.5.3
 matplotlib>=3.7.0
 seaborn>=0.12.0
 
+# Machine learning (additional)
+xgboost>=2.0.0  # Gradient boosting classifier
+
 # Configuration and utilities
 PyYAML>=6.0
 tqdm>=4.65.0

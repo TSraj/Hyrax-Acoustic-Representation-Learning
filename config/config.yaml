@@ -58,6 +58,22 @@ models:
     hidden_size: 1024
     description: "Multilingual model trained on 128 languages"
 
+  hubert_base:
+    name: "hubert-base-ls960"
+    model_id: "facebook/hubert-base-ls960"
+    num_layers: 12
+    hidden_size: 768
+    description: "HuBERT pretrained on LibriSpeech (960h)"
+    model_type: "hubert"
+
+  hubert_large:
+    name: "hubert-large-ls960-ft"
+    model_id: "facebook/hubert-large-ls960-ft"
+    num_layers: 24
+    hidden_size: 1024
+    description: "HuBERT Large pretrained and fine-tuned on LibriSpeech"
+    model_type: "hubert"
+
 # Feature extraction settings
 feature_extraction:
   batch_size: 8
@@ -75,6 +91,31 @@ pooling:
     - "first"       # First token
     - "last"        # Last token
   # Weighted pooling can be added later
+
+# Handcrafted Features (Baseline Comparisons)
+handcrafted_features:
+  mfcc:
+    enabled: true
+    n_mfcc: 13
+    n_fft: 2048
+    hop_length: 512
+    n_mels: 128
+    fmin: 0
+    fmax: 8000
+
+  spectral:
+    enabled: true
+    n_fft: 2048
+    hop_length: 512
+    n_mels: 128
+
+  prosodic:
+    enabled: true
+    hop_length: 512
+    frame_length: 2048
+    fmin: 50.0      # Minimum pitch frequency (Hz)
+    fmax: 8000.0    # Maximum pitch frequency (Hz)
+    n_statistics: 10
 
 # Dimensionality reduction and visualization
 visualization:
@@ -143,6 +184,73 @@ logistic_regression:
   test_size: 0.2
   random_state: 42
   multi_class: 'multinomial'
+
+# SVM Classification
+svm:
+  enabled: true
+  linear:
+    enabled: true
+    C_values: [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
+    cv_folds: 5
+    test_size: 0.2
+    random_state: 42
+  rbf:
+    enabled: true
+    C_values: [0.001, 0.01, 0.1, 1.0, 10.0]
+    gamma_values: ['scale', 'auto', 0.001, 0.01, 0.1]
+    cv_folds: 5
+    test_size: 0.2
+    random_state: 42
+
+# Ensemble Classifiers
+ensemble:
+  random_forest:
+    enabled: true
+    n_estimators_values: [50, 100, 200]
+    max_depth_values: [10, 20, null]  # null = unlimited
+    min_samples_split_values: [2, 5, 10]
+    cv_folds: 5
+    test_size: 0.2
+    random_state: 42
+  xgboost:
+    enabled: true
+    n_estimators_values: [50, 100, 200]
+    max_depth_values: [3, 5, 7]
+    learning_rate_values: [0.01, 0.1, 0.3]
+    cv_folds: 5
+    test_size: 0.2
+    random_state: 42
+
+# Scaling Experiments (Number of Individuals)
+scaling:
+  enabled: true
+  num_individuals_list: [2, 3, 5, 8]  # Will use 'all' as well
+  n_trials: 5  # Number of random trials per configuration
+  individual_selection: 'random'  # 'random', 'most_samples', 'least_samples'
+  test_size: 0.2
+  random_state: 42
+
+# Feature Fusion
+feature_fusion:
+  enabled: true
+  strategies:
+    - 'concatenation'  # Simple concatenation
+    - 'weighted'  # Weighted concatenation
+    - 'pca_fusion'  # PCA then concatenate
+  normalize: true
+  pca_dims: 128  # For pca_fusion strategy
+
+# Layer Combination
+layer_combination:
+  enabled: true
+  strategies:
+    - 'concatenation'  # Concatenate layers
+    - 'mean'  # Average layers
+    - 'weighted_mean'  # Weighted average
+  layer_selections:
+    - 'early_middle_late'  # One from each group
+    - 'early'  # First 3 layers
+    - 'late'  # Last 3 layers
 
 # Evaluation metrics
 metrics:
