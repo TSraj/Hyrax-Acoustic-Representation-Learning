@@ -39,7 +39,7 @@ preprocessing:
   normalize: true
   trim_silence: false  # Can be enabled if needed
   silence_threshold: 0.01
-  min_duration: 0.1  # Minimum duration in seconds
+  min_duration: 0.5  # Minimum duration in seconds
   max_duration: 10.0  # Maximum duration in seconds
 
 # Model configurations

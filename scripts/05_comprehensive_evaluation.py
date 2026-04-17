@@ -399,7 +399,9 @@ def plot_combined_layer_comparison(
     ax.set_xticks(x)
     ax.set_xticklabels(all_layers)
     ax.grid(True, alpha=0.3, linestyle='--', axis='y')
-    ax.legend(loc='best', fontsize=12, framealpha=0.9)
+
+    # Move legend outside plot area to avoid overlap with bars
+    ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=12, framealpha=0.9)
     ax.set_ylim([0, 1.0])
 
     # Add horizontal line at 0.5 for reference

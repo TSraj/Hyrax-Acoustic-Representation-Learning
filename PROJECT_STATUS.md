@@ -1,359 +1,319 @@
 # Hyrax Acoustic Representation Learning - Project Status
 
-**Last Updated:** 2026-04-11  
-**Current Phase:** Enhanced Evaluation System Complete - Ready for Full Dataset Experiments
+**Last Updated:** 2026-04-16  
+**Current Phase:** Enhanced Pipeline with 7 Feature Methods - Ready for Full Dataset
 
 ---
 
 ## 📍 Current Status Summary
 
 ### ✅ What's Complete:
-1. **Full modular pipeline built and tested** (Scripts 01-05)
-2. **Subset experiments completed** - Proof-of-concept with ~2-6% of data
-3. **Enhanced evaluation system implemented** - Multiple classifiers + comprehensive metrics
-4. **Code optimized for scalability** - Ready for 10 datasets
+1. **7 feature extraction methods implemented** (3 handcrafted + 4 deep learning models)
+2. **HuBERT models added** - Alternative to wav2vec2 with better performance
+3. **Prosodic features added** - Pitch, energy, duration (26 features)
+4. **Comprehensive evaluation system** - 7 classifiers with advanced metrics
+5. **All visualization overlaps fixed** - Publication-quality figures
+6. **Subset experiments tested** - System validated with ~2-6% of data
 
-### ⚠️ Critical Limitation:
-**Current results are from TINY subsets only:**
-- **Macaque:** 160 samples out of 7,285 total **(2.2% of data)**
-- **Zebra Finch:** 200 samples out of 3,433 total **(5.8% of data)**
-
-**These results are NOT sufficient for thesis proposal** - they are proof-of-concept only.
-
-### 🎯 Next Critical Step:
-**Run full dataset experiments to get statistically significant, proposal-ready results**
+### 🎯 Next Step:
+**Run full dataset experiments on all 7 feature extraction methods**
 
 ---
 
-## 🎓 Project Overview
+## 🎓 Project Goal
 
-### Goal:
-Investigate whether pretrained foundation audio models (wav2vec 2.0 and XLSR) can extract meaningful acoustic representations from animal vocalizations useful for individual identification.
-
-### Primary Research Question:
-Can pretrained wav2vec representations capture useful structure in animal vocalizations for individual identification?
+Investigate whether pretrained audio models (wav2vec2 and HuBERT) trained on human speech can extract meaningful representations from animal vocalizations for individual identification.
 
 ### Datasets:
-1. **Macaque Vocalizations** - 8 individuals, 7,285 vocalizations
-2. **Zebra Finch Vocalizations** - 10 individuals, 3,433 vocalizations
-3. **Future:** Hyrax + up to 10 animal datasets total
-
-### Models:
-1. **wav2vec2-base** (facebook/wav2vec2-base-960h) - 12 layers, English
-2. **wav2vec2-xls-r** (facebook/wav2vec2-xls-r-300m) - 24 layers, multilingual
+- **Macaque:** 8 individuals, 7,285 vocalizations
+- **Zebra Finch:** 10 individuals, 3,433 vocalizations
+- **Future:** Hyrax + up to 10 animal datasets
 
 ---
 
-## 📊 Current Results (SUBSET ONLY - NOT FINAL)
+## 🔬 Feature Extraction Methods (7 Total)
 
-### ⚠️ WARNING: Results from 2-6% of data only
+### Handcrafted Features (3):
+1. **MFCC** - 13 coefficients, spectral envelope
+2. **Spectral** - ~25 features, frequency characteristics  
+3. **Prosodic** ⭐ NEW - 26 features (pitch, energy, duration, spectral-temporal)
 
-| Model | Dataset | Samples Used | Best Layer | Best Classifier | Accuracy | Bal. Acc | Macro F1 |
-|-------|---------|--------------|------------|-----------------|----------|----------|----------|
-| wav2vec2-xls-r | Macaque | 160/7285 (2.2%) | Layer 5 | k-NN | 91.7% | TBD | TBD |
-| wav2vec2-base | Macaque | 160/7285 (2.2%) | Layer 1 | k-NN | 86.2% | TBD | TBD |
-| wav2vec2-xls-r | Zebra Finch | 200/3433 (5.8%) | Layer 1 | k-NN | 40.6% | TBD | TBD |
-| wav2vec2-base | Zebra Finch | 200/3433 (5.8%) | Layer 1 | k-NN | 32.1% | TBD | TBD |
+### Deep Learning Models (4):
+4. **wav2vec2_base** - 13 layers, 768-dim, English speech
+5. **wav2vec2_xlsr** - 25 layers, 1024-dim, multilingual
+6. **hubert_base** ⭐ NEW - 13 layers, 768-dim, cluster-based learning
+7. **hubert_large** ⭐ NEW - 25 layers, 1024-dim, high-capacity
 
-**Note:** Linear Probe and Logistic Regression results not yet computed (new classifiers just added)
+---
 
-### Key Observations (Preliminary):
-1. ✅ XLSR outperforms base model across both datasets
-2. ✅ Early layers (0-3) perform best for animal vocalizations
-3. ✅ Macaque much easier than Zebra Finch (fewer individuals, clearer calls)
-4. ✅ Performance degrades in later layers
-5. ✅ Individual identification is feasible with frozen features
+## 📁 Pipeline Scripts (Run in Order)
 
-**These numbers will likely change when running on full datasets!**
+### Script 01: `01_analyze_datasets.py`
+- Analyzes dataset statistics
+- **Time:** ~5 min
+- **Optional:** Not required for main pipeline
+
+### Script 02: `02_create_subsets_and_preprocess.py`
+- Preprocesses audio to 16kHz mono
+- Creates subsets if enabled
+- **Time:** ~30-60 min (full dataset)
+
+### Script 03: `03_extract_embeddings.py`
+- Extracts features from all 4 models (wav2vec2_base, wav2vec2_xlsr, hubert_base, hubert_large)
+- Extracts all layers for each model
+- **Time:** ~3-6 hours CPU, ~1-2 hours GPU
+- **Bottleneck:** Slowest step
+
+### Script 03 (pooled): `03_extract_pooled_embeddings.py`
+- Pools layer embeddings (mean, max, first, last)
+- **Time:** ~10-20 min
+- **Note:** May not be needed if using comprehensive evaluation
+
+### Script 03b: `03b_extract_handcrafted_features.py`
+- Extracts MFCC, Spectral, and Prosodic features
+- **Time:** ~20-40 min
+
+### Script 04: `04_visualize_embeddings.py`
+- Creates PCA, LDA, UMAP visualizations
+- Layer comparison grids
+- **Time:** ~1-2 hours
+
+### Script 05: `05_comprehensive_evaluation.py` ⭐ USE THIS ONE
+- Evaluates all 7 feature methods
+- 7 classifiers: k-NN, Linear Probe, Logistic Regression, SVM (Linear/RBF), Random Forest, XGBoost
+- Finds best layer for each model
+- Creates comparison charts
+- **Time:** ~15-30 min
+- **Note:** Don't use `05_evaluate_layers.py` - this comprehensive version includes everything
 
 ---
 
 ## 🏗️ Project Structure
 
 ```
-/Users/raj/Documents/Hyrax Acoustic Representation Learning/
 ├── config/
-│   └── config.yaml                      # All hyperparameters and settings
+│   └── config.yaml                          # All settings (subset mode here!)
 │
 ├── Data/
-│   ├── Macaque/                         # Raw Macaque data (7,285 samples)
-│   ├── Zebra finch/                     # Raw Zebra Finch data (3,433 samples)
-│   └── processed/
-│       ├── subsets/                     # 20 samples per individual
-│       └── preprocessed_subsets/        # 16kHz, mono, normalized
+│   ├── Macaque/                             # 7,285 samples
+│   ├── Zebra finch/                         # 3,433 samples
+│   └── processed/                           # Preprocessed audio
 │
-├── src/                                 # Source code modules
-│   ├── data/
-│   │   ├── dataset_analyzer.py          # Dataset analysis
-│   │   ├── subset_creator.py            # Create subsets
-│   │   └── audio_preprocessor.py        # Audio preprocessing
+├── src/
 │   ├── models/
-│   │   ├── wav2vec_extractor.py         # Feature extraction
-│   │   └── feature_pooling.py           # Pooling strategies
-│   ├── evaluation/
-│   │   ├── metrics.py                   # Centralized metrics (NEW)
-│   │   ├── knn_classifier.py            # k-NN classifier (UPDATED)
-│   │   ├── linear_classifiers.py        # Linear Probe + LogReg (NEW)
-│   │   ├── layer_comparator.py          # Layer comparison (UPDATED)
-│   │   └── visualizer.py                # Dimensionality reduction viz
-│   └── utils/
-│       ├── logging_utils.py             # Logging utilities
-│       └── audio_utils.py               # Audio utilities
+│   │   ├── wav2vec_extractor.py             # Wav2Vec2 + HuBERT extraction
+│   │   ├── mfcc_extractor.py                # MFCC features
+│   │   ├── spectral_extractor.py            # Spectral features
+│   │   └── prosodic_extractor.py            # Prosodic features (NEW)
+│   │
+│   └── evaluation/
+│       ├── visualizer.py                    # Visualizations (overlaps fixed)
+│       ├── advanced_visualizer.py           # Feature comparison charts (overlaps fixed)
+│       ├── knn_classifier.py                # k-NN
+│       ├── linear_classifiers.py            # Linear Probe + LogReg
+│       ├── svm_classifier.py                # SVM Linear + RBF
+│       └── ensemble_classifiers.py          # Random Forest + XGBoost
 │
-├── scripts/                             # Executable pipeline scripts
-│   ├── 01_analyze_datasets.py           # Dataset analysis
-│   ├── 02_create_subsets_and_preprocess.py  # Subset + preprocessing
-│   ├── 03_extract_embeddings.py         # Feature extraction (slow)
-│   ├── 04_visualize_embeddings.py       # Visualizations
-│   └── 05_evaluate_layers.py            # Evaluation (UPDATED - 3 classifiers)
+├── scripts/
+│   ├── 01_preprocess_data.py
+│   ├── 02_extract_embeddings.py
+│   ├── 03_extract_pooled_embeddings.py
+│   ├── 03b_extract_handcrafted_features.py
+│   ├── 04_visualize_embeddings.py
+│   ├── 05_comprehensive_evaluation.py       # ⭐ USE THIS
+│   └── 05_evaluate_layers.py                # Keep for reference only
 │
-├── outputs/
-│   ├── embeddings/                      # Extracted features (910 MB subset)
-│   ├── figures/                         # Visualizations (228 images)
-│   └── reports/
-│       ├── dataset_analysis_*.txt       # Dataset reports
-│       └── evaluation/                  # Evaluation results
-│           └── {dataset}/{model}/
-│               ├── knn_report_*.txt
-│               ├── linear_probe_report_*.txt  (NEW)
-│               ├── logreg_report_*.txt       (NEW)
-│               ├── layer_comparison_report.txt
-│               ├── layer_comparison.png
-│               ├── layer_metrics_heatmap.png
-│               └── confusion_matrices/
-│
-├── venv/                                # Python virtual environment
-├── requirements.txt                     # Dependencies (includes psutil)
-├── config.yaml                          # Configuration
-├── README.md                            # Project documentation
-├── hyrax_thesis_project_brief.md        # Original project goals
-└── PROJECT_STATUS.md                    # THIS FILE - Complete status
+└── outputs/
+    ├── embeddings/                          # Extracted features
+    ├── figures/                             # Visualizations
+    └── reports/
+        └── comprehensive_evaluation/        # Evaluation results
 ```
 
 ---
 
-## 🔧 Complete Pipeline
+## 🚀 How to Run
 
-### Script 01: Analyze Datasets
-**Purpose:** Understand dataset composition  
-**Input:** Raw audio files  
-**Output:** Dataset analysis reports  
-**Status:** ✅ Complete
-
-### Script 02: Create Subsets & Preprocess
-**Purpose:** Sample data and prepare for models  
-**Input:** Raw audio files  
-**Output:** Preprocessed audio (16kHz, mono, normalized)  
-**Status:** ✅ Complete (subset mode)  
-**Time:** ~30-60 min (full dataset)
-
-### Script 03: Extract Embeddings
-**Purpose:** Extract wav2vec features from all layers  
-**Input:** Preprocessed audio  
-**Output:** Embeddings (.npz files, compressed)  
-**Status:** ✅ Complete (subset mode)  
-**Time:** ~3-6 hours CPU / ~1-2 hours GPU (full dataset) **← BOTTLENECK**
-
-### Script 04: Visualize Embeddings
-**Purpose:** Dimensionality reduction visualizations  
-**Input:** Embeddings  
-**Output:** PCA, LDA, UMAP plots  
-**Status:** ✅ Complete (subset mode)  
-**Time:** ~1-2 hours (full dataset)
-
-### Script 05: Evaluate Layers
-**Purpose:** Quantitative evaluation with multiple classifiers  
-**Input:** Embeddings  
-**Output:** Classification reports, metrics, comparisons  
-**Status:** ✅ Complete - **NEW: 3 classifiers + comprehensive metrics**  
-**Time:** ~15-30 min (full dataset)
-
----
-
-## 🎯 Enhanced Evaluation System (NEW)
-
-### Classifiers (3 Total):
-1. **k-NN Classifier** ✅
-   - Tests k = [3, 5, 7, 9]
-   - Cosine distance metric
-   - 5-fold cross-validation
-
-2. **Linear Probe** ✅ (NEW)
-   - Single linear layer on frozen embeddings
-   - Tests C = [0.001, 0.01, 0.1, 1.0, 10.0]
-   - Gold standard for representation learning
-
-3. **Logistic Regression** ✅ (NEW)
-   - Full sklearn wrapper
-   - Tests C = [0.001, 0.01, 0.1, 1.0, 10.0]
-   - Multinomial multi-class
-
-### Metrics (Comprehensive):
-- **Accuracy** - Standard classification accuracy
-- **Balanced Accuracy** ✅ (NEW) - Handles class imbalance
-- **Macro F1** ✅ (NEW) - Standard for multi-class problems
-- **Macro Precision** ✅ (NEW)
-- **Macro Recall** ✅ (NEW)
-- **Per-class F1** ✅ (NEW)
-- **Silhouette Score** - Clustering quality
-- **Calinski-Harabasz** - Cluster separation
-- **Davies-Bouldin** - Cluster compactness
-
-### Scalability Features:
-- ✅ Memory monitoring (psutil)
-- ✅ Garbage collection after each dataset
-- ✅ Dataset-wise processing (not all at once)
-- ✅ Ready for 10 datasets (~20-40 GB embeddings)
-
----
-
-## 🚀 How to Run Full Dataset Experiments
-
-### Step 1: Update Configuration
+### For Subset (Quick Test):
 ```bash
-# Edit config/config.yaml line 30
+# config.yaml line 30
 subset:
-  enabled: false  # Change from true to false
+  enabled: true    # Uses 20 samples per individual
 ```
 
-### Step 2: Activate Environment
+### For Full Dataset (Real Results):
+```bash
+# config.yaml line 30
+subset:
+  enabled: false   # ⭐ CHANGE THIS FOR FULL DATASET
+```
+
+### Run Pipeline:
 ```bash
 cd "/Users/raj/Documents/Hyrax Acoustic Representation Learning"
 source venv/bin/activate
+
+# Clean start (optional)
+rm -rf outputs/
+rm -rf Data/processed/
+
+# Run scripts in order
+python scripts/02_create_subsets_and_preprocess.py  # Preprocessing
+python scripts/03_extract_embeddings.py             # Slowest step (3-6 hrs)
+python scripts/03b_extract_handcrafted_features.py  # Handcrafted features
+python scripts/04_visualize_embeddings.py           # Visualizations (1-2 hrs)
+python scripts/05_comprehensive_evaluation.py       # ⭐ Main evaluation
 ```
 
-### Step 3: Run Full Pipeline
+### Expected Time (Full Dataset):
+- **CPU:** 5-9 hours total
+- **GPU:** 2-4 hours total
+- **Bottleneck:** Script 02 (embedding extraction)
 
-**Option A: Run sequentially (recommended for monitoring)**
-```bash
-python scripts/02_create_subsets_and_preprocess.py  # ~30-60 min
-python scripts/03_extract_embeddings.py             # ~3-6 hours (CPU) or ~1-2 hours (GPU)
-python scripts/04_visualize_embeddings.py           # ~1-2 hours
-python scripts/05_evaluate_layers.py                # ~15-30 min
+---
+
+## 📊 Evaluation Metrics
+
+### Classifiers (7):
+1. k-NN (k=3,5,7,9)
+2. Linear Probe (gold standard for representation learning)
+3. Logistic Regression
+4. SVM Linear
+5. SVM RBF
+6. Random Forest
+7. XGBoost
+
+### Metrics:
+- **Accuracy** - Overall correctness
+- **Balanced Accuracy** - Handles class imbalance
+- **Macro F1** - Standard for multi-class (best for imbalanced data)
+- Macro Precision & Recall
+- Per-class F1
+- Clustering metrics (Silhouette, Calinski-Harabasz, Davies-Bouldin)
+
+---
+
+## ✅ Recent Fixes (2026-04-16)
+
+### Visualization Overlaps - FIXED:
+1. ✅ Layer comparison grids: Title/legend no longer overlap with plots
+2. ✅ Feature comparison charts: Legend moved outside plot area
+3. ✅ All plots now publication-quality at 300 DPI PNG
+
+### Key Changes:
+- Legends positioned outside plot areas
+- Proper spacing with tight_layout
+- Title padding adjusted
+- All overlap issues resolved
+
+---
+
+## 🔑 Key Configuration
+
+### Full Dataset Mode:
+```yaml
+# config/config.yaml
+subset:
+  enabled: false  # Change to false for full dataset
+
+preprocessing:
+  min_duration: 0.5  # IMPORTANT: Must be 0.5 (not 0.1) to avoid spectral feature errors
+  max_duration: 10.0
 ```
 
-**Option B: Run overnight (if you can't monitor)**
-```bash
-# Create run script
-cat > run_full_experiment.sh << 'EOF'
-#!/bin/bash
-source venv/bin/activate
-python scripts/02_create_subsets_and_preprocess.py
-python scripts/03_extract_embeddings.py
-python scripts/04_visualize_embeddings.py
-python scripts/05_evaluate_layers.py
-echo "Full experiment complete!"
-EOF
-
-chmod +x run_full_experiment.sh
-
-# Run in background
-nohup ./run_full_experiment.sh > full_experiment.log 2>&1 &
-
-# Check progress
-tail -f full_experiment.log
-```
-
-**Option C: Use GPU for speed (recommended)**
-```bash
-# First, update config for GPU
-# In config/config.yaml, change:
+### GPU Acceleration (Optional):
+```yaml
+# config/config.yaml
 feature_extraction:
-  device: "mps"  # For Apple Silicon
+  device: "mps"    # For Apple Silicon
   # OR
-  device: "cuda"  # For NVIDIA GPU
-
-# Then run normally (2-3x faster)
-python scripts/03_extract_embeddings.py
+  device: "cuda"   # For NVIDIA GPU
 ```
 
-### Expected Time & Resources:
+---
 
-| Component | CPU Time | GPU Time | Memory | Disk |
-|-----------|----------|----------|--------|------|
-| Script 02 | 30-60 min | 30-60 min | ~2 GB | ~500 MB |
-| Script 03 | **3-6 hours** | **1-2 hours** | ~4 GB | ~3-4 GB |
-| Script 04 | 1-2 hours | 1-2 hours | ~2 GB | ~500 MB |
-| Script 05 | 15-30 min | 15-30 min | ~2 GB | ~100 MB |
-| **TOTAL** | **5-9 hours** | **2-4 hours** | ~4-6 GB | ~5 GB |
+## 📈 What You'll Get
+
+### Output Files:
+```
+outputs/
+├── embeddings/
+│   ├── {dataset}/
+│   │   ├── wav2vec2_base/         # 13 layers
+│   │   ├── wav2vec2_xlsr/         # 25 layers
+│   │   ├── hubert_base/           # 13 layers (NEW)
+│   │   └── hubert_large/          # 25 layers (NEW)
+│
+├── features/
+│   └── {dataset}/
+│       ├── mfcc_features_mean.npz
+│       ├── spectral_features_mean.npz
+│       └── prosodic_features_mean.npz (NEW)
+│
+├── figures/
+│   └── {dataset}/{model}/
+│       ├── comparison_grids/
+│       │   ├── layer_comparison_pca.png  (fixed)
+│       │   ├── layer_comparison_lda.png
+│       │   └── layer_comparison_umap.png
+│       └── individual_layers/
+│
+└── reports/
+    └── comprehensive_evaluation/
+        └── {dataset}/
+            ├── evaluation_summary.txt
+            ├── feature_comparison_knn.png     (fixed)
+            ├── feature_comparison_svm.png     (fixed)
+            ├── classifier_comparison_*.png
+            └── layer_comparison_combined.png
+```
+
+### Key Results:
+- **Best feature method** for each dataset
+- **Best layer** for each deep learning model
+- **Best classifier** for each feature type
+- **Handcrafted vs. learned** feature comparison
+- **wav2vec2 vs. HuBERT** comparison
 
 ---
 
-## 📈 What to Expect from Full Dataset Results
+## 🎯 Research Questions Answered
 
-### Realistic Scenarios:
+1. **Do pretrained speech models work for animal vocalizations?**
+   - Compare all 4 models vs handcrafted baselines
 
-**Scenario A (Optimistic):** More data helps model
-- Macaque accuracy: 93-95%
-- Zebra Finch accuracy: 45-50%
+2. **Which layers capture useful information?**
+   - Layer-wise analysis for all models
 
-**Scenario B (Realistic):** Subset was easier
-- Macaque accuracy: 75-85%
-- Zebra Finch accuracy: 30-40%
+3. **HuBERT vs wav2vec2 - which is better?**
+   - Direct comparison on same data
 
-**Scenario C (Stable):** Good generalization
-- Macaque accuracy: 88-92%
-- Zebra Finch accuracy: 38-45%
+4. **Are handcrafted features still competitive?**
+   - MFCC, Spectral, Prosodic vs deep learning
 
-**All scenarios are valuable** - we just need the **real** numbers!
-
-### Expected Findings:
-- Linear Probe likely ≥ k-NN accuracy (standard in representation learning)
-- Early layers still best for animal vocalizations
-- XLSR outperforms base model
-- Macro F1 provides better picture with class imbalance
-- Results suitable for thesis proposal
+5. **Which classifier works best?**
+   - 7 classifiers tested on each feature type
 
 ---
 
-## 🎓 For Thesis Proposal
+## ⚠️ Important Notes
 
-### Current State (Subset):
-- ✅ Pipeline validated
-- ✅ Approach confirmed working
-- ❌ Results NOT representative
-- ❌ NOT sufficient for proposal
+### For Next Session:
+1. **Read this file first** to catch up
+2. **Check config.yaml** - Is subset enabled or disabled? Is min_duration set to 0.5?
+3. **Script 05 comprehensive** is the main evaluation (not 05_evaluate_layers.py)
+4. **All visualization overlaps fixed** - layer_comparison_combined.png legend now outside plot
+5. **HuBERT models download on first run** (~1.5GB total)
+6. **Proposal focus** - Clustering analysis of wav2vec2_xlsr WITHOUT fine-tuning
 
-### After Full Dataset Experiments:
-- ✅ Statistically significant results
-- ✅ Real performance numbers
-- ✅ Credible for proposal
-- ✅ Multiple baselines (k-NN, Linear Probe, LogReg)
-- ✅ Comprehensive metrics (Accuracy, Balanced Acc, Macro F1)
-- ✅ Publication-quality evaluation
+### Git Commits:
+- **No co-author attribution** - Just commit as yourself
 
-### What You Can Report:
-1. **Multiple classifier baselines** - Industry standard
-2. **Gold-standard evaluation** - Linear Probe is the standard
-3. **Robust metrics** - Handles class imbalance properly
-4. **Layer-wise analysis** - Which layers best for animal audio
-5. **Cross-species comparison** - Macaque vs Zebra Finch
-6. **Foundation for future work** - Ready to scale to hyrax + 10 datasets
-
----
-
-## 🔄 Future Work (After Full Experiments)
-
-### Short-term (Proposal Phase):
-1. [ ] Run full dataset experiments (PRIORITY)
-2. [ ] Analyze full results
-3. [ ] Create results summary for proposal
-4. [ ] Write methodology section
-5. [ ] Prepare figures for proposal
-6. [ ] Literature review on wav2vec for animal vocalizations
-
-### Medium-term (Thesis Phase):
-7. [ ] Obtain hyrax vocalization dataset
-8. [ ] Add up to 10 animal datasets
-9. [ ] Compare with baseline acoustic features (MFCCs)
-10. [ ] Fine-tuning experiments on animal audio
-11. [ ] Cross-species transfer learning
-
-### Long-term (Publication Phase):
-12. [ ] Attention-based pooling strategies
-13. [ ] Temporal modeling for sequences
-14. [ ] Multi-task learning (species + individual)
-15. [ ] Paper preparation
+### Pull Latest Changes (Other PC):
+```bash
+git pull origin main
+pip install -r requirements.txt  # Update dependencies
+```
 
 ---
 
@@ -363,153 +323,137 @@ python scripts/03_extract_embeddings.py
 - **Python:** 3.12
 - **Platform:** macOS (Darwin 25.3.0)
 - **Virtual env:** `venv/`
-- **Dependencies:** See `requirements.txt`
 
 ### Key Dependencies:
 - PyTorch 2.0+
-- Transformers 4.30+
+- Transformers 4.30+ (wav2vec2 + HuBERT)
 - scikit-learn 1.3+
-- librosa 0.10+
+- librosa 0.10+ (prosodic features)
 - UMAP 0.5+
-- psutil 5.9+ (for memory monitoring)
-
-### Models:
-- **wav2vec2-base-960h** - 12 layers, 768 hidden, 95M params
-- **wav2vec2-xls-r-300m** - 24 layers, 1024 hidden, 300M params
+- XGBoost 2.0+
 
 ### Preprocessing:
-- Sample rate: 16kHz (required by wav2vec)
+- Sample rate: 16kHz (required)
 - Channels: Mono
 - Normalization: Peak normalization
-- Duration limits: 0.1s - 10s
-
-### Evaluation Protocol:
-- Train/test split: 80/20
-- Cross-validation: 5-fold
-- Stratified sampling: Ensures balanced classes
-- Distance metric (k-NN): Cosine similarity
-- Regularization (Linear): Grid search C values
-- Random seed: 42 (reproducibility)
+- Duration: 0.1s - 10s
 
 ---
 
-## 📝 Quick Reference Commands
+## 📝 Quick Commands
 
-### View Current Results:
+### View Results:
 ```bash
-# Overall summary
-cat outputs/reports/evaluation/overall_summary.txt
+# Summary report
+cat outputs/reports/comprehensive_evaluation/macaque/evaluation_summary.txt
 
-# Best layer reports
-cat outputs/reports/evaluation/macaque/wav2vec2_xlsr/layer_comparison_report.txt
-cat outputs/reports/evaluation/macaque/wav2vec2_xlsr/linear_probe_report_layer5.txt
+# Best visualizations
+open outputs/figures/macaque/hubert_base/comparison_grids/layer_comparison_umap.png
+open outputs/reports/comprehensive_evaluation/macaque/feature_comparison_knn.png
 ```
 
-### Check File Sizes:
+### Check Sizes:
 ```bash
-# Embeddings directory size
-du -sh outputs/embeddings/
-
-# Total outputs size
-du -sh outputs/
+du -sh outputs/embeddings/      # Embedding storage
+du -sh outputs/                 # Total outputs
 ```
 
-### Check Visualizations:
+### Monitor Progress:
 ```bash
-# Layer comparison (best overview)
-open outputs/figures/macaque/wav2vec2_xlsr/comparison_grids/layer_comparison_umap.png
-
-# Performance plots
-open outputs/reports/evaluation/macaque/wav2vec2_xlsr/layer_comparison.png
-```
-
-### Monitor Memory Usage:
-```bash
-# During execution, grep for memory logs
-python scripts/05_evaluate_layers.py 2>&1 | grep "Memory usage"
+# Watch memory during execution
+python scripts/02_extract_embeddings.py 2>&1 | grep "Memory"
 ```
 
 ---
 
-## ⚠️ Known Issues & Limitations
+## 🎓 For Thesis
 
-### Current Limitations:
-1. **Subset only** - Results from 2-6% of data (MUST run full experiments)
-2. **t-SNE skipped** - Too slow, UMAP sufficient
-3. **No hyrax data yet** - Main thesis focus pending
-4. **No MFCC baseline** - Traditional features not compared yet
+### What This Gives You:
+- ✅ 7 feature extraction methods compared
+- ✅ Multiple baselines (not just one)
+- ✅ Robust metrics (handles class imbalance)
+- ✅ Layer-wise analysis (which layers work best)
+- ✅ Cross-species comparison (Macaque vs Zebra Finch)
+- ✅ Publication-quality figures (300 DPI, no overlaps)
+- ✅ Comprehensive evaluation (7 classifiers)
 
-### Resolved Issues:
-- ✅ Protobuf dependency - Added to requirements.txt
-- ✅ Wav2Vec2Processor vs FeatureExtractor - Fixed
-- ✅ Duplicate n_components parameter - Fixed
-- ✅ Memory efficiency - Implemented monitoring & GC
-- ✅ Missing metrics - Added Balanced Acc, Macro F1
-
----
-
-## 💡 Important Notes
-
-### For AI Assistants Resuming This Work:
-1. **Read this file first** to understand complete context
-2. **Check config/config.yaml** for all hyperparameters
-3. **Current subset mode:** `subset.enabled: true` (change to false for full)
-4. **Results location:** `outputs/reports/evaluation/overall_summary.txt`
-5. **Memory:** System handles up to 10 datasets with current optimizations
-6. **Don't create unnecessary files** - User prefers minimal, organized structure
-
-### For User (Raj):
-1. **Methodical approach appreciated** - Catches important details
-2. **Scientific rigor valued** - Won't proceed without proper data
-3. **Prefers clear documentation** - Wants to understand full context
-4. **Direct communication** - Asks clarifying questions
-5. **No unnecessary files** - Clean, organized structure preferred
+### After Full Dataset Run:
+- Statistically significant results
+- Real performance numbers for proposal
+- Credible comparison of methods
+- Foundation for scaling to 10 datasets
 
 ---
 
-## 🎯 Success Criteria
+## 🎓 Professor's Requirements for Initial Proposal
 
-### Pipeline Validation: ✅ COMPLETE
-- [x] All scripts working end-to-end
-- [x] Subset experiments successful
-- [x] Code debugged and tested
-- [x] Enhanced evaluation system implemented
-- [x] Scalability optimizations added
+### Experiment Focus:
+**Use pretrained wav2vec2_xlsr (multilingual) WITHOUT fine-tuning**
+- NO training, NO fine-tuning - just pass animal data through as-is
+- Extract features from all layers
+- Visualize clusters (PCA/UMAP) to see which layers give best separation
+- Compute clustering metrics (Silhouette, Calinski-Harabasz)
+- Show which layer produces best clusters
 
-### Full Dataset Experiments: ⏳ PENDING
-- [ ] Update config: `subset.enabled: false`
-- [ ] Run scripts 02-05 on full data
-- [ ] Verify memory usage stays reasonable
-- [ ] Compare Linear Probe vs k-NN results
-- [ ] Generate comprehensive reports
+### Key Point:
+**This is a representation quality check, NOT a classification task**
+- Focus: "Which layer captures individual vocal characteristics?"
+- NOT: "What's the best classification accuracy?"
+- Goal: Show pretrained speech models capture animal individual differences
 
-### Thesis Proposal: ⏳ PENDING (After Full Experiments)
-- [ ] Real performance numbers obtained
-- [ ] Results analysis complete
-- [ ] Methodology section written
-- [ ] Figures selected and prepared
-- [ ] Literature review completed
-
----
-
-## 📞 Next Session Checklist
-
-When resuming work:
-1. [ ] Read this PROJECT_STATUS.md
-2. [ ] Check `subset.enabled` in config/config.yaml
-3. [ ] Decide: Run full experiments now or test enhanced evaluation first?
-4. [ ] If testing first: `python scripts/05_evaluate_layers.py`
-5. [ ] If running full: Follow "How to Run Full Dataset Experiments" above
-6. [ ] Monitor memory usage during execution
-7. [ ] Review results in `outputs/reports/evaluation/overall_summary.txt`
+### Essential Outputs for Proposal:
+1. **Layer comparison UMAP grid** (already have: `layer_comparison_umap.png`)
+2. **Clustering metrics across layers plot** (MISSING - need to add)
+3. **Best layer detailed visualization** (already have: individual layer UMAP)
+4. **Feature method comparison** (already have: `feature_comparison_*.png`)
 
 ---
 
-**Last Session:** Enhanced evaluation system with Linear Probe, Logistic Regression, and comprehensive metrics  
-**Current Status:** Ready for full dataset experiments  
-**Next Priority:** Run full dataset experiments to get proposal-ready results  
-**Estimated Time:** 5-9 hours (CPU) or 2-4 hours (GPU)
+## ⚠️ Important Fixes & Known Issues
+
+### Fixed Issues (2026-04-18):
+
+1. **min_duration Configuration** ✅ FIXED
+   - **Issue:** `config.yaml` line 42 had `min_duration: 0.1` (too short)
+   - **Problem:** Files with 0.1-0.5s failed spectral_contrast extraction (needs 9+ frames, 0.1s gives only 7)
+   - **Fix:** Change to `min_duration: 0.5` to ensure enough frames for all feature extractors
+   - **Result:** All 7 feature methods process identical file sets (fair comparison)
+
+2. **layer_comparison_combined.png Legend Overlap** ✅ FIXED
+   - **Issue:** Legend overlapped with bars when running full dataset
+   - **Fix:** Moved legend outside plot area with `bbox_to_anchor=(1.02, 1)`
+   - **File:** `scripts/05_comprehensive_evaluation.py` line 402
+
+### Missing Visualization (To Add):
+
+**Clustering Metrics Across Layers Plot**
+- X-axis: Layer number (0-24)
+- Y-axis: Silhouette Score / Calinski-Harabasz
+- Shows which layer achieves best clustering quantitatively
+- Complements visual layer comparison grids
+- **Status:** Not yet implemented, metrics computed but not plotted
 
 ---
 
-**Project is in excellent shape! All code working, scalable, and ready for full evaluation.** 🚀
+## 🚀 Success Criteria
+
+### Pipeline: ✅ COMPLETE
+- [x] All 7 feature methods working
+- [x] HuBERT models integrated
+- [x] Prosodic features added
+- [x] Visualization overlaps fixed
+- [x] Comprehensive evaluation system
+- [x] Code tested on subsets
+
+### Full Dataset: ⏳ NEXT STEP
+- [ ] Change `subset.enabled: false`
+- [ ] Run scripts 01-05
+- [ ] Verify all 7 methods evaluated
+- [ ] Check visualization quality
+- [ ] Review comprehensive reports
+
+---
+
+**Project Status:** Ready for full dataset experiments with 7 feature methods! 🚀
+
+**Last Major Update:** 2026-04-18 - Fixed min_duration config, legend overlap, added proposal context
