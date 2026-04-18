@@ -27,7 +27,7 @@ datasets:
 
 # Subset creation (for initial experiments)
 subset:
-  enabled: true
+  enabled: false  # Use full dataset
   samples_per_individual: 20  # Number of samples to select per individual
   random_seed: 42
   stratified: true  # Ensure balanced sampling
@@ -39,7 +39,7 @@ preprocessing:
   normalize: true
   trim_silence: false  # Can be enabled if needed
   silence_threshold: 0.01
-  min_duration: 0.5  # Minimum duration in seconds
+  min_duration: 0.1  # Minimum duration in seconds (macaque calls ~0.09s avg)
   max_duration: 10.0  # Maximum duration in seconds
 
 # Model configurations

@@ -196,6 +196,18 @@ def evaluate_feature_type(
     logger.info(f"Features shape: {features.shape}")
     logger.info(f"{'='*60}")
 
+    # Filter out individuals with too few samples for stratified splitting
+    unique_labels, label_counts = np.unique(labels, return_counts=True)
+    min_samples_needed = 2  # Minimum samples per class for stratified split
+
+    classes_to_remove = unique_labels[label_counts < min_samples_needed]
+    if len(classes_to_remove) > 0:
+        logger.warning(f"Removing {len(classes_to_remove)} individuals with <{min_samples_needed} samples: {classes_to_remove}")
+        valid_mask = ~np.isin(labels, classes_to_remove)
+        features = features[valid_mask]
+        labels = labels[valid_mask]
+        logger.info(f"Filtered dataset: {features.shape[0]} samples, {len(np.unique(labels))} individuals")
+
     # Split data
     X_train, X_test, y_train, y_test = train_test_split(
         features, labels,
