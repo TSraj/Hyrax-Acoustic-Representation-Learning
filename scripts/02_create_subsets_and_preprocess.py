@@ -29,59 +29,91 @@ def main():
     logger.info("SCRIPT 02: CREATE SUBSETS AND PREPROCESS")
     logger.info("=" * 80)
 
-    # Create subsets
-    if config['subset']['enabled']:
-        logger.info("\nSTEP 1: Creating subsets...")
-        logger.info("-" * 80)
+    # Get active datasets from config
+    active_datasets = config['datasets'].get('active', [])
+    logger.info(f"\nProcessing {len(active_datasets)} datasets: {', '.join(active_datasets)}")
 
-        subset_creator = SubsetCreator(config, config['experiment']['log_level'])
+    # Determine input/output directories
+    if config['subset']['enabled']:
+        logger.info("\nSubset mode: ENABLED")
+        logger.info(f"  Samples per individual: {config['subset']['samples_per_individual']}")
         subset_output_dir = Path(config['paths']['processed_dir']) / "subsets"
-
-        subset_metadata = subset_creator.create_all_subsets(str(subset_output_dir))
-
-        logger.info(f"\nSubsets created:")
-        logger.info(f"  Macaque: {subset_metadata['macaque']['total_files']} files")
-        logger.info(f"  Zebra Finch: {subset_metadata['zebra_finch']['total_files']} files")
-    else:
-        logger.info("\nSubset creation disabled in config")
-        subset_output_dir = Path(config['paths']['data_dir'])
-
-    # Preprocess audio
-    logger.info("\n\nSTEP 2: Preprocessing audio...")
-    logger.info("-" * 80)
-
-    preprocessor = AudioPreprocessor(config, config['experiment']['log_level'])
-
-    if config['subset']['enabled']:
-        # Preprocess subsets
         preprocess_output_dir = Path(config['paths']['processed_dir']) / "preprocessed_subsets"
-        stats = preprocessor.preprocess_all_subsets(
-            str(subset_output_dir),
-            str(preprocess_output_dir)
-        )
     else:
-        # Preprocess full datasets
+        logger.info("\nSubset mode: DISABLED (using full datasets)")
+        subset_output_dir = None
         preprocess_output_dir = Path(config['paths']['processed_dir']) / "preprocessed_full"
-        stats = {}
 
-        # Macaque
-        stats['macaque'] = preprocessor.preprocess_dataset(
-            config['datasets']['macaque']['path'],
-            str(preprocess_output_dir / "macaque")
-        )
+    # Initialize preprocessor
+    preprocessor = AudioPreprocessor(config, config['experiment']['log_level'])
+    subset_creator = SubsetCreator(config, config['experiment']['log_level']) if config['subset']['enabled'] else None
 
-        # Zebra Finch
-        stats['zebra_finch'] = preprocessor.preprocess_dataset(
-            config['datasets']['zebra_finch']['path'],
-            str(preprocess_output_dir / "zebra_finch")
-        )
+    # Process each dataset
+    all_stats = {}
+    for dataset_key in active_datasets:
+        logger.info(f"\n{'='*80}")
+        logger.info(f"PROCESSING: {dataset_key.upper()}")
+        logger.info(f"{'='*80}")
 
-    logger.info(f"\nPreprocessing complete:")
-    logger.info(f"  Macaque: {stats['macaque']['successful']}/{stats['macaque']['total_files']} successful")
-    logger.info(f"  Zebra Finch: {stats['zebra_finch']['successful']}/{stats['zebra_finch']['total_files']} successful")
+        dataset_config = config['datasets'].get(dataset_key)
+        if not dataset_config:
+            logger.warning(f"Dataset '{dataset_key}' not found in config, skipping...")
+            continue
+
+        dataset_path = Path(dataset_config['path'])
+        if not dataset_path.exists():
+            logger.warning(f"Dataset path does not exist: {dataset_path}, skipping...")
+            continue
+
+        try:
+            if config['subset']['enabled']:
+                # Create subset first
+                logger.info(f"\nSTEP 1: Creating subset for {dataset_key}...")
+                dataset_subset_dir = subset_output_dir / dataset_key
+                subset_meta = subset_creator.create_subset_generic(
+                    str(dataset_path),
+                    str(dataset_subset_dir),
+                    dataset_name=dataset_config['name']
+                )
+                logger.info(f"  Created subset: {subset_meta.get('total_files', 0)} files")
+
+                # Preprocess subset
+                logger.info(f"\nSTEP 2: Preprocessing subset for {dataset_key}...")
+                dataset_preprocess_dir = preprocess_output_dir / dataset_key
+                stats = preprocessor.preprocess_dataset(
+                    str(dataset_subset_dir),
+                    str(dataset_preprocess_dir)
+                )
+            else:
+                # Preprocess full dataset
+                logger.info(f"\nPreprocessing full dataset for {dataset_key}...")
+                dataset_preprocess_dir = preprocess_output_dir / dataset_key
+                stats = preprocessor.preprocess_dataset(
+                    str(dataset_path),
+                    str(dataset_preprocess_dir)
+                )
+
+            all_stats[dataset_key] = stats
+            logger.info(f"✓ {dataset_key}: {stats['successful']}/{stats['total_files']} files successful")
+
+        except Exception as e:
+            logger.error(f"Error processing {dataset_key}: {e}")
+            continue
+
+    # Summary
+    logger.info("\n" + "=" * 80)
+    logger.info("PREPROCESSING SUMMARY")
+    logger.info("=" * 80)
+    total_successful = sum(s['successful'] for s in all_stats.values())
+    total_files = sum(s['total_files'] for s in all_stats.values())
+    logger.info(f"Total: {total_successful}/{total_files} files successfully preprocessed")
+    logger.info(f"Datasets processed: {len(all_stats)}/{len(active_datasets)}")
+
+    for dataset_key, stats in all_stats.items():
+        logger.info(f"  {dataset_key}: {stats['successful']}/{stats['total_files']}")
 
     logger.info("\n" + "=" * 80)
-    logger.info("Subset creation and preprocessing complete!")
+    logger.info("✓ Preprocessing complete!")
     logger.info(f"Preprocessed data saved to: {preprocess_output_dir}")
     logger.info("=" * 80)
 

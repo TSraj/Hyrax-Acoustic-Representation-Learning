@@ -11,10 +11,65 @@ paths:
 
 # Dataset configurations
 datasets:
+  # Active datasets to process (use these keys in the active list below)
+  active:
+    # - "adult_chimpanzee"  # DISABLED: Continuous recordings, no individual folders
+    - "anuraset"  # 60s files (auto-chunked into 60s segments)
+    - "bengalese_finch"
+    # - "colombia_costa_rica_birds"  # DISABLED: Soundscape data, no individual folders
+    # - "gibbon"  # DISABLED: Continuous recordings (30-min files), no individual folders
+    - "macaque"
+    - "marmoset"
+    # - "meerkats"  # DISABLED: 43-min files create 20GB+ embedding files (too large for draft)
+    # - "mouse"  # DISABLED: Flat structure, no individual folders
+    - "picidae"
+    - "wetlands_bird"  # MP3 files (auto-converted to WAV)
+    - "zebra_finch"
+
+  adult_chimpanzee:
+    name: "Adult Chimpanzee Vocalizations"
+    path: "Data/Adult Chimpanzee"
+    type: "individual_identification"
+
+  anuraset:
+    name: "AnuraSet Frog Vocalizations"
+    path: "Data/AnuraSet/raw_data"
+    type: "individual_identification"
+
+  bengalese_finch:
+    name: "Bengalese Finch Vocalizations"
+    path: "Data/Bengalese finch"
+    type: "individual_identification"
+
+  colombia_costa_rica_birds:
+    name: "Colombia Costa Rica Birds"
+    path: "Data/Colombia Costa Rica Birds"
+    type: "individual_identification"
+
+  gibbon:
+    name: "Gibbon Vocalizations"
+    path: "Data/Gibbon/doi_10_5061_dryad_mn12jv2__v20190620/gibbon_superregular_data/training_data"
+    type: "individual_identification"
+
   macaque:
     name: "Macaque Vocalizations"
     path: "Data/Macaque"
     individuals: ["AL", "BE", "IO", "MU", "QU", "SN", "TH", "TW"]
+    type: "individual_identification"
+
+  marmoset:
+    name: "Marmoset Vocalizations"
+    path: "Data/Marmoset"
+    type: "individual_identification"
+
+  meerkats:
+    name: "Meerkat Vocalizations"
+    path: "Data/Meerkats/Development_Set/Training_Set"
+    type: "individual_identification"
+
+  mouse:
+    name: "Mouse Vocalizations"
+    path: "Data/Mouse/mouse_C57BL"
     type: "individual_identification"
 
   zebra_finch:
@@ -25,10 +80,20 @@ datasets:
       chick: "ChickVocalizations"
     type: "individual_and_call_type"
 
+  picidae:
+    name: "7 Picidae Species (Woodpeckers)"
+    path: "Data/7 Picidae Species"
+    type: "individual_identification"
+
+  wetlands_bird:
+    name: "Western Mediterranean Wetlands Bird"
+    path: "Data/Western Mediterranean Wetlands Bird"
+    type: "individual_identification"
+
 # Subset creation (for initial experiments)
 subset:
-  enabled: false  # Use full dataset
-  samples_per_individual: 20  # Number of samples to select per individual
+  enabled: true  # Set to false to use ALL available data
+  samples_per_individual: 100  # FULL RUN: 100 samples per individual (increase if datasets have more)
   random_seed: 42
   stratified: true  # Ensure balanced sampling
 
@@ -39,8 +104,12 @@ preprocessing:
   normalize: true
   trim_silence: false  # Can be enabled if needed
   silence_threshold: 0.01
-  min_duration: 0.1  # Minimum duration in seconds (macaque calls ~0.09s avg)
-  max_duration: 10.0  # Maximum duration in seconds
+  min_duration: 0.05  # Minimum duration in seconds (50ms - includes short macaque calls)
+  max_duration: 3600.0  # Maximum duration in seconds (60 min to handle long recordings)
+  chunk_long_files: true  # Automatically chunk files longer than chunk_threshold
+  chunk_threshold: 60.0  # Files longer than this (seconds) will be chunked
+  chunk_size: 30.0  # Size of each chunk in seconds (FULL RUN: 30s for better temporal resolution)
+  chunk_overlap: 5.0  # Overlap between chunks in seconds
 
 # Model configurations
 models:

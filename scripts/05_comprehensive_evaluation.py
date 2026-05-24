@@ -17,6 +17,7 @@ Date: 2026-04-11
 import yaml
 import sys
 import numpy as np
+import pandas as pd
 import gc
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -503,6 +504,242 @@ def save_summary_report(all_results: Dict, output_path: Path, logger):
     logger.info(f"Saved summary report: {output_path}")
 
 
+def export_layer_wise_accuracy_csv(all_datasets_layer_data: Dict, output_path: Path, logger):
+    """
+    Export layer-wise accuracy for all models across all datasets.
+
+    CSV Format:
+    Dataset, Model, Layer, Accuracy, Balanced_Accuracy, Macro_F1
+    """
+    rows = []
+
+    for dataset_name, models_data in all_datasets_layer_data.items():
+        for model_name, layer_info in models_data.items():
+            if layer_info and 'layer_results' in layer_info:
+                for layer_idx, metrics in layer_info['layer_results'].items():
+                    rows.append({
+                        'Dataset': dataset_name,
+                        'Model': model_name,
+                        'Layer': layer_idx,
+                        'Accuracy': metrics['accuracy'],
+                        'Balanced_Accuracy': metrics['balanced_accuracy'],
+                        'Macro_F1': metrics['macro_f1']
+                    })
+
+    if rows:
+        df = pd.DataFrame(rows)
+        df = df.sort_values(['Dataset', 'Model', 'Layer'])
+        df.to_csv(output_path, index=False)
+        logger.info(f"✓ Saved layer-wise accuracy CSV: {output_path.name}")
+    else:
+        logger.warning("No layer data to export")
+
+
+def export_best_layer_per_model_csv(all_datasets_layer_data: Dict, output_path: Path, logger):
+    """
+    Export best performing layer for each model on each dataset.
+
+    CSV Format:
+    Dataset, Model, Best_Layer, Accuracy, Balanced_Accuracy, Macro_F1
+    """
+    rows = []
+
+    for dataset_name, models_data in all_datasets_layer_data.items():
+        for model_name, layer_info in models_data.items():
+            if layer_info and 'best_layer' in layer_info:
+                best_layer = layer_info['best_layer']
+                best_metrics = layer_info['layer_results'][best_layer]
+                rows.append({
+                    'Dataset': dataset_name,
+                    'Model': model_name,
+                    'Best_Layer': best_layer,
+                    'Accuracy': best_metrics['accuracy'],
+                    'Balanced_Accuracy': best_metrics['balanced_accuracy'],
+                    'Macro_F1': best_metrics['macro_f1']
+                })
+
+    if rows:
+        df = pd.DataFrame(rows)
+        df = df.sort_values(['Dataset', 'Model'])
+        df.to_csv(output_path, index=False)
+        logger.info(f"✓ Saved best layer per model CSV: {output_path.name}")
+    else:
+        logger.warning("No best layer data to export")
+
+
+def export_model_comparison_csv(all_datasets_results: Dict, output_path: Path, logger):
+    """
+    Compare all models (including handcrafted features) across datasets.
+
+    CSV Format:
+    Dataset, Feature_Type, Classifier, Accuracy, Balanced_Accuracy, Macro_F1
+    """
+    rows = []
+
+    for dataset_name, dataset_results in all_datasets_results.items():
+        for feature_name, feature_results in dataset_results.items():
+            for classifier_name, metrics in feature_results.items():
+                rows.append({
+                    'Dataset': dataset_name,
+                    'Feature_Type': feature_name,
+                    'Classifier': classifier_name,
+                    'Accuracy': metrics['accuracy'],
+                    'Balanced_Accuracy': metrics['balanced_accuracy'],
+                    'Macro_F1': metrics['macro_f1']
+                })
+
+    if rows:
+        df = pd.DataFrame(rows)
+        df = df.sort_values(['Dataset', 'Feature_Type', 'Classifier'])
+        df.to_csv(output_path, index=False)
+        logger.info(f"✓ Saved model comparison CSV: {output_path.name}")
+    else:
+        logger.warning("No model comparison data to export")
+
+
+def export_classifier_comparison_csv(all_datasets_results: Dict, output_path: Path, logger):
+    """
+    Compare all classifiers across feature types and datasets.
+
+    CSV Format:
+    Classifier, Dataset, Feature_Type, Accuracy, Balanced_Accuracy, Macro_F1
+    """
+    rows = []
+
+    for dataset_name, dataset_results in all_datasets_results.items():
+        for feature_name, feature_results in dataset_results.items():
+            for classifier_name, metrics in feature_results.items():
+                rows.append({
+                    'Classifier': classifier_name,
+                    'Dataset': dataset_name,
+                    'Feature_Type': feature_name,
+                    'Accuracy': metrics['accuracy'],
+                    'Balanced_Accuracy': metrics['balanced_accuracy'],
+                    'Macro_F1': metrics['macro_f1']
+                })
+
+    if rows:
+        df = pd.DataFrame(rows)
+        df = df.sort_values(['Classifier', 'Dataset', 'Feature_Type'])
+        df.to_csv(output_path, index=False)
+        logger.info(f"✓ Saved classifier comparison CSV: {output_path.name}")
+    else:
+        logger.warning("No classifier comparison data to export")
+
+
+def export_cross_species_summary_csv(all_datasets_results: Dict, all_datasets_layer_data: Dict,
+                                     output_path: Path, logger):
+    """
+    Overall summary showing best performance per dataset.
+
+    CSV Format:
+    Dataset, Best_Feature_Type, Best_Classifier, Best_Accuracy, Best_Balanced_Accuracy, Best_Macro_F1,
+    Best_Model_Layer, Best_Layer_Accuracy
+    """
+    rows = []
+
+    for dataset_name, dataset_results in all_datasets_results.items():
+        # Find best overall performance
+        best_acc = 0
+        best_feature = None
+        best_classifier = None
+        best_metrics = None
+
+        for feature_name, feature_results in dataset_results.items():
+            for classifier_name, metrics in feature_results.items():
+                if metrics['balanced_accuracy'] > best_acc:
+                    best_acc = metrics['balanced_accuracy']
+                    best_feature = feature_name
+                    best_classifier = classifier_name
+                    best_metrics = metrics
+
+        # Find best layer performance
+        best_layer_model = None
+        best_layer = None
+        best_layer_acc = 0
+
+        if dataset_name in all_datasets_layer_data:
+            for model_name, layer_info in all_datasets_layer_data[dataset_name].items():
+                if layer_info and 'best_layer' in layer_info:
+                    best_l = layer_info['best_layer']
+                    acc = layer_info['layer_results'][best_l]['balanced_accuracy']
+                    if acc > best_layer_acc:
+                        best_layer_acc = acc
+                        best_layer_model = model_name
+                        best_layer = best_l
+
+        if best_metrics:
+            rows.append({
+                'Dataset': dataset_name,
+                'Best_Feature_Type': best_feature,
+                'Best_Classifier': best_classifier,
+                'Best_Accuracy': best_metrics['accuracy'],
+                'Best_Balanced_Accuracy': best_metrics['balanced_accuracy'],
+                'Best_Macro_F1': best_metrics['macro_f1'],
+                'Best_Model_Layer': f"{best_layer_model}_L{best_layer}" if best_layer_model else 'N/A',
+                'Best_Layer_Accuracy': best_layer_acc if best_layer_acc > 0 else 'N/A'
+            })
+
+    if rows:
+        df = pd.DataFrame(rows)
+        df = df.sort_values('Best_Balanced_Accuracy', ascending=False)
+        df.to_csv(output_path, index=False)
+        logger.info(f"✓ Saved cross-species summary CSV: {output_path.name}")
+    else:
+        logger.warning("No cross-species summary data to export")
+
+
+def export_all_csv_results(all_datasets_results: Dict, all_datasets_layer_data: Dict,
+                           output_dir: Path, logger):
+    """Export all CSV files."""
+    logger.info("\n" + "="*80)
+    logger.info("EXPORTING CSV RESULTS")
+    logger.info("="*80)
+
+    csv_dir = output_dir / "csv_exports"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Layer-wise accuracy (all layers × models × datasets)
+    export_layer_wise_accuracy_csv(
+        all_datasets_layer_data,
+        csv_dir / "layer_wise_accuracy.csv",
+        logger
+    )
+
+    # 2. Best layer per model per dataset
+    export_best_layer_per_model_csv(
+        all_datasets_layer_data,
+        csv_dir / "best_layer_per_model.csv",
+        logger
+    )
+
+    # 3. Model comparison (all features × classifiers × datasets)
+    export_model_comparison_csv(
+        all_datasets_results,
+        csv_dir / "model_comparison.csv",
+        logger
+    )
+
+    # 4. Classifier comparison
+    export_classifier_comparison_csv(
+        all_datasets_results,
+        csv_dir / "classifier_comparison.csv",
+        logger
+    )
+
+    # 5. Cross-species summary
+    export_cross_species_summary_csv(
+        all_datasets_results,
+        all_datasets_layer_data,
+        csv_dir / "cross_species_summary.csv",
+        logger
+    )
+
+    logger.info("="*80)
+    logger.info(f"✓ All CSV exports saved to: {csv_dir}")
+    logger.info("="*80)
+
+
 def main():
     """Main execution."""
     # Setup logging
@@ -525,8 +762,16 @@ def main():
     random_state = config['random_seed']
     pooling_method = 'mean'
 
+    # Storage for all datasets results (for CSV export)
+    all_datasets_results = {}
+    all_datasets_layer_data = {}
+
+    # Get list of datasets from config
+    dataset_list = config.get('datasets', {}).get('active', ['macaque', 'zebra_finch'])
+    logger.info(f"\nProcessing {len(dataset_list)} datasets: {', '.join(dataset_list)}")
+
     # Process each dataset
-    for dataset_key in ['macaque', 'zebra_finch']:
+    for dataset_key in dataset_list:
         logger.info(f"\n\n{'#'*80}")
         logger.info(f"# DATASET: {dataset_key.upper()}")
         logger.info(f"{'#'*80}\n")
@@ -598,6 +843,12 @@ def main():
             else:
                 logger.warning(f"Embeddings not found: {embeddings_file}")
 
+        # Store results for CSV export
+        if all_results:
+            all_datasets_results[dataset_key] = all_results
+        if layer_data:
+            all_datasets_layer_data[dataset_key] = layer_data
+
         # 3. Generate visualizations
         if all_results:
             generate_comparison_visualizations(all_results, layer_data, dataset_output_dir, dataset_key, logger)
@@ -611,6 +862,10 @@ def main():
         if PSUTIL_AVAILABLE:
             log_memory_usage(logger, "after dataset")
 
+    # Export all CSV results (after all datasets processed)
+    if all_datasets_results or all_datasets_layer_data:
+        export_all_csv_results(all_datasets_results, all_datasets_layer_data, output_dir, logger)
+
     logger.info("\n" + "="*80)
     logger.info("✓ Comprehensive evaluation complete!")
     logger.info("="*80)
@@ -618,7 +873,14 @@ def main():
     logger.info("\nGenerated files:")
     logger.info("  - feature_comparison_*.png (bar charts)")
     logger.info("  - classifier_comparison_*.png (bar charts)")
+    logger.info("  - layer_comparison_combined.png (layer comparison)")
     logger.info("  - evaluation_summary.txt (text report)")
+    logger.info("  - csv_exports/ (CSV tables)")
+    logger.info("    • layer_wise_accuracy.csv")
+    logger.info("    • best_layer_per_model.csv")
+    logger.info("    • model_comparison.csv")
+    logger.info("    • classifier_comparison.csv")
+    logger.info("    • cross_species_summary.csv")
 
 
 if __name__ == "__main__":

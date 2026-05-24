@@ -156,3 +156,70 @@ def audio_to_mono(audio: np.ndarray) -> np.ndarray:
         return np.mean(audio, axis=0)
     else:
         raise ValueError(f"Unexpected audio shape: {audio.shape}")
+
+
+def chunk_audio(
+    audio: np.ndarray,
+    sr: int,
+    chunk_size: float,
+    overlap: float = 0.0
+) -> list:
+    """
+    Split audio into overlapping chunks.
+
+    Args:
+        audio: Audio signal array
+        sr: Sample rate
+        chunk_size: Size of each chunk in seconds
+        overlap: Overlap between chunks in seconds
+
+    Returns:
+        List of audio chunks
+    """
+    chunk_samples = int(chunk_size * sr)
+    hop_samples = int((chunk_size - overlap) * sr)
+
+    chunks = []
+    start = 0
+
+    while start < len(audio):
+        end = min(start + chunk_samples, len(audio))
+        chunk = audio[start:end]
+
+        # Only add chunk if it's long enough
+        if len(chunk) >= hop_samples:
+            chunks.append(chunk)
+
+        start += hop_samples
+
+        # Break if we've reached the end
+        if end >= len(audio):
+            break
+
+    return chunks
+
+
+def find_audio_files(directory: Path, recursive: bool = True) -> list:
+    """
+    Find all audio files (WAV, MP3, FLAC) in a directory.
+
+    Args:
+        directory: Directory to search
+        recursive: Search recursively if True
+
+    Returns:
+        List of audio file paths
+    """
+    audio_extensions = ['*.wav', '*.mp3', '*.flac', '*.WAV', '*.MP3', '*.FLAC']
+    audio_files = []
+
+    for ext in audio_extensions:
+        if recursive:
+            audio_files.extend(directory.glob(f"**/{ext}"))
+        else:
+            audio_files.extend(directory.glob(ext))
+
+    # Filter out macOS metadata files
+    audio_files = [f for f in audio_files if not f.name.startswith('._')]
+
+    return sorted(audio_files)

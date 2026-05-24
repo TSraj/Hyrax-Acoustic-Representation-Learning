@@ -133,12 +133,16 @@ def main():
     output_dir = Path(config['paths']['figures_dir'])
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Visualize all combinations of models and datasets
-    models = ['wav2vec2_base', 'wav2vec2_xlsr']
-    datasets = ['macaque', 'zebra_finch']
+    # Get active datasets and models from config
+    active_datasets = config['datasets'].get('active', [])
+    models_to_visualize = ['wav2vec2_base', 'wav2vec2_xlsr', 'hubert_base', 'hubert_large']
 
-    for model_name in models:
-        for dataset_name in datasets:
+    logger.info(f"\nDatasets: {', '.join(active_datasets)}")
+    logger.info(f"Models: {', '.join(models_to_visualize)}")
+
+    # Visualize all combinations of models and datasets
+    for model_name in models_to_visualize:
+        for dataset_name in active_datasets:
             logger.info("\n" + "=" * 80)
             logger.info(f"VISUALIZING: {model_name} - {dataset_name}")
             logger.info("=" * 80)

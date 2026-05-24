@@ -28,40 +28,62 @@ def main():
     logger.info("SCRIPT 01: DATASET ANALYSIS")
     logger.info("=" * 80)
 
+    # Get active datasets from config
+    active_datasets = config['datasets'].get('active', [])
+    logger.info(f"\nAnalyzing {len(active_datasets)} datasets: {', '.join(active_datasets)}")
+
     # Create analyzer
     analyzer = DatasetAnalyzer(config, config['experiment']['log_level'])
 
-    # Analyze Macaque dataset
-    macaque_stats = analyzer.analyze_macaque_dataset()
-
-    # Analyze Zebra Finch dataset
-    zebra_stats = analyzer.analyze_zebra_finch_dataset()
-
-    # Save individual analyses
+    # Output directory
     output_dir = Path(config['paths']['reports_dir'])
     output_dir.mkdir(parents=True, exist_ok=True)
-
     timestamp = get_timestamp()
 
-    analyzer.save_analysis(
-        macaque_stats,
-        str(output_dir / f"macaque_analysis_{timestamp}.json")
-    )
+    # Analyze each dataset
+    all_stats = {}
+    for dataset_key in active_datasets:
+        logger.info(f"\n{'='*80}")
+        logger.info(f"ANALYZING: {dataset_key.upper()}")
+        logger.info(f"{'='*80}")
 
-    analyzer.save_analysis(
-        zebra_stats,
-        str(output_dir / f"zebra_finch_analysis_{timestamp}.json")
-    )
+        dataset_config = config['datasets'].get(dataset_key)
+        if not dataset_config:
+            logger.warning(f"Dataset '{dataset_key}' not found in config, skipping...")
+            continue
 
-    # Generate combined report
-    analyzer.generate_report(
-        macaque_stats,
-        zebra_stats,
-        str(output_dir / f"dataset_analysis_report_{timestamp}.txt")
-    )
+        dataset_path = Path(dataset_config['path'])
+        if not dataset_path.exists():
+            logger.warning(f"Dataset path does not exist: {dataset_path}, skipping...")
+            continue
 
-    logger.info("=" * 80)
-    logger.info("Dataset analysis complete!")
+        # Analyze dataset using generic method
+        try:
+            stats = analyzer.analyze_generic_dataset(
+                dataset_path=str(dataset_path),
+                dataset_name=dataset_config['name']
+            )
+            all_stats[dataset_key] = stats
+
+            # Save individual analysis
+            analyzer.save_analysis(
+                stats,
+                str(output_dir / f"{dataset_key}_analysis_{timestamp}.json")
+            )
+            logger.info(f"✓ Analysis saved for {dataset_key}")
+
+        except Exception as e:
+            logger.error(f"Error analyzing {dataset_key}: {e}")
+            continue
+
+    # Generate combined report for all datasets
+    if all_stats:
+        report_path = output_dir / f"dataset_analysis_report_{timestamp}.txt"
+        analyzer.generate_combined_report(all_stats, str(report_path))
+        logger.info(f"\n✓ Combined report saved to: {report_path}")
+
+    logger.info("\n" + "=" * 80)
+    logger.info(f"✓ Dataset analysis complete! Analyzed {len(all_stats)}/{len(active_datasets)} datasets")
     logger.info("=" * 80)
 
 

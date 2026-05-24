@@ -5,11 +5,14 @@ Subset creator for generating small test subsets from datasets.
 import random
 import shutil
 import json
+import soundfile as sf
+import numpy as np
 from pathlib import Path
 from typing import List, Dict
 from collections import defaultdict
 
 from src.utils.logging_utils import setup_logger
+from src.utils.audio_utils import find_audio_files, chunk_audio, get_audio_info
 
 
 class SubsetCreator:
@@ -171,6 +174,134 @@ class SubsetCreator:
             json.dump(subset_info, f, indent=2)
 
         self.logger.info(f"Zebra Finch subset created: {subset_info['total_files']} total files")
+        return subset_info
+
+    def create_subset_generic(self, dataset_path: str, output_dir: str,
+                              dataset_name: str = "generic", samples_per_individual: int = None) -> Dict:
+        """
+        Create a balanced subset for any generic dataset.
+        Assumes structure: dataset_path/individual_id/*.wav
+
+        Args:
+            dataset_path: Path to the source dataset
+            output_dir: Directory to save subset
+            dataset_name: Name of the dataset (for metadata)
+            samples_per_individual: Number of samples per individual (uses config if None)
+
+        Returns:
+            Dictionary containing subset metadata
+        """
+        if samples_per_individual is None:
+            samples_per_individual = self.config['subset']['samples_per_individual']
+
+        self.logger.info(f"Creating {dataset_name} subset with {samples_per_individual} samples per individual...")
+
+        dataset_path = Path(dataset_path)
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        subset_info = {
+            'dataset': dataset_name,
+            'samples_per_individual': samples_per_individual,
+            'individuals': {},
+            'total_files': 0,
+            'random_seed': self.random_seed
+        }
+
+        # Find all subdirectories (assumed to be individuals)
+        subdirs = [d for d in dataset_path.iterdir() if d.is_dir() and not d.name.startswith('.')]
+
+        if not subdirs:
+            self.logger.warning(f"No individual directories found in {dataset_path}")
+            return subset_info
+
+        # Get chunking settings from config
+        chunk_long_files = self.config.get('preprocessing', {}).get('chunk_long_files', False)
+        chunk_threshold = self.config.get('preprocessing', {}).get('chunk_threshold', 60.0)
+        chunk_size = self.config.get('preprocessing', {}).get('chunk_size', 30.0)
+        chunk_overlap = self.config.get('preprocessing', {}).get('chunk_overlap', 5.0)
+
+        for individual_dir in subdirs:
+            individual_name = individual_dir.name
+
+            # Get all audio files (WAV, MP3, FLAC) recursively
+            audio_files = find_audio_files(individual_dir, recursive=True)
+
+            if len(audio_files) == 0:
+                self.logger.warning(f"No audio files found for {individual_name}")
+                continue
+
+            # Sample files
+            num_samples = min(samples_per_individual, len(audio_files))
+            selected_files = random.sample(audio_files, num_samples)
+
+            # Create output directory for this individual
+            individual_output_dir = output_path / individual_name
+            individual_output_dir.mkdir(parents=True, exist_ok=True)
+
+            # Process selected files (copy or chunk)
+            copied_files = []
+            chunked_count = 0
+
+            for file_path in selected_files:
+                try:
+                    # Check file duration
+                    info = get_audio_info(str(file_path))
+                    duration = info['duration']
+
+                    # If file is too long and chunking is enabled, create chunks
+                    if chunk_long_files and duration > chunk_threshold:
+                        self.logger.info(f"    Chunking {file_path.name} ({duration:.1f}s)...")
+
+                        # Load audio
+                        audio, sr = sf.read(str(file_path))
+                        if audio.ndim > 1:
+                            audio = np.mean(audio, axis=1)
+
+                        # Create chunks
+                        chunks = chunk_audio(audio, sr, chunk_size, chunk_overlap)
+
+                        # Save chunks
+                        for i, chunk in enumerate(chunks):
+                            chunk_filename = f"{file_path.stem}_chunk{i:03d}.wav"
+                            chunk_path = individual_output_dir / chunk_filename
+                            sf.write(str(chunk_path), chunk, sr)
+                            copied_files.append(str(file_path) + f" (chunk {i})")
+                            chunked_count += 1
+
+                    else:
+                        # Regular copy (handles MP3 → WAV conversion)
+                        output_file = individual_output_dir / f"{file_path.stem}.wav"
+
+                        if file_path.suffix.lower() in ['.mp3', '.flac']:
+                            # Convert to WAV
+                            audio, sr = sf.read(str(file_path))
+                            sf.write(str(output_file), audio, sr)
+                        else:
+                            # Direct copy for WAV files
+                            shutil.copy2(file_path, output_file)
+
+                        copied_files.append(str(file_path))
+
+                except Exception as e:
+                    self.logger.warning(f"Error processing {file_path.name}: {e}")
+                    continue
+
+            subset_info['individuals'][individual_name] = {
+                'num_files': len(copied_files),
+                'num_chunks': chunked_count,
+                'source_files': copied_files
+            }
+            subset_info['total_files'] += len(copied_files)
+
+            self.logger.info(f"  {individual_name}: {len(copied_files)} files ({chunked_count} from chunking)")
+
+        # Save metadata
+        metadata_path = output_path / "subset_metadata.json"
+        with open(metadata_path, 'w') as f:
+            json.dump(subset_info, f, indent=2)
+
+        self.logger.info(f"✓ {dataset_name} subset created: {subset_info['total_files']} total files from {len(subset_info['individuals'])} individuals")
         return subset_info
 
     def create_all_subsets(self, output_dir: str = None) -> Dict:

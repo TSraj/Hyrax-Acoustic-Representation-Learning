@@ -183,6 +183,184 @@ class DatasetAnalyzer:
         self.logger.info(f"Zebra Finch dataset: {stats['total_files']} files (adult + chick)")
         return stats
 
+    def analyze_generic_dataset(self, dataset_path: str, dataset_name: str) -> Dict:
+        """
+        Analyze any generic dataset (individual identification structure).
+        Assumes structure: dataset_path/individual_id/*.wav
+
+        Args:
+            dataset_path: Path to the dataset root
+            dataset_name: Human-readable name of the dataset
+
+        Returns:
+            Dictionary containing dataset statistics
+        """
+        self.logger.info(f"Analyzing {dataset_name}...")
+
+        dataset_path = Path(dataset_path)
+
+        stats = {
+            'dataset_name': dataset_name,
+            'dataset_path': str(dataset_path),
+            'individuals': {},
+            'total_files': 0,
+            'total_duration': 0.0,
+            'sample_rates': set(),
+            'channels': set()
+        }
+
+        # Find all subdirectories (assumed to be individuals)
+        subdirs = [d for d in dataset_path.iterdir() if d.is_dir() and not d.name.startswith('.')]
+
+        if not subdirs:
+            # No subdirectories, might be flat structure - just scan for wav files
+            audio_files = list(dataset_path.glob("**/*.wav"))
+            stats['total_files'] = len(audio_files)
+            stats['structure'] = 'flat'
+
+            # Sample analysis
+            sample_files = audio_files[:20]
+            durations = []
+            for audio_file in tqdm(sample_files, desc=f"Sampling {dataset_name}", leave=False):
+                try:
+                    info = get_audio_info(str(audio_file))
+                    durations.append(info['duration'])
+                    stats['sample_rates'].add(info['sample_rate'])
+                    stats['channels'].add(info['channels'])
+                except Exception as e:
+                    self.logger.warning(f"Error analyzing {audio_file}: {e}")
+
+            stats['avg_duration'] = sum(durations) / len(durations) if durations else 0
+            stats['total_duration'] = stats['avg_duration'] * len(audio_files)
+        else:
+            # Hierarchical structure with individuals
+            stats['structure'] = 'hierarchical'
+
+            for individual_dir in subdirs:
+                individual_name = individual_dir.name
+                audio_files = list(individual_dir.glob("**/*.wav"))
+
+                if not audio_files:
+                    continue
+
+                individual_stats = {
+                    'num_files': len(audio_files),
+                    'durations': [],
+                    'sample_rates': [],
+                    'channels': []
+                }
+
+                # Sample analysis (first 10 files per individual)
+                sample_files = audio_files[:min(10, len(audio_files))]
+                for audio_file in tqdm(sample_files, desc=f"Sampling {individual_name}", leave=False):
+                    try:
+                        info = get_audio_info(str(audio_file))
+                        individual_stats['durations'].append(info['duration'])
+                        individual_stats['sample_rates'].append(info['sample_rate'])
+                        individual_stats['channels'].append(info['channels'])
+
+                        stats['sample_rates'].add(info['sample_rate'])
+                        stats['channels'].add(info['channels'])
+                    except Exception as e:
+                        self.logger.warning(f"Error analyzing {audio_file}: {e}")
+
+                # Compute summary statistics
+                if individual_stats['durations']:
+                    individual_stats['avg_duration'] = sum(individual_stats['durations']) / len(individual_stats['durations'])
+                    individual_stats['min_duration'] = min(individual_stats['durations'])
+                    individual_stats['max_duration'] = max(individual_stats['durations'])
+                else:
+                    individual_stats['avg_duration'] = 0
+                    individual_stats['min_duration'] = 0
+                    individual_stats['max_duration'] = 0
+
+                stats['individuals'][individual_name] = individual_stats
+                stats['total_files'] += individual_stats['num_files']
+                stats['total_duration'] += individual_stats['avg_duration'] * individual_stats['num_files']
+
+        # Convert sets to lists for JSON serialization
+        stats['sample_rates'] = sorted(list(stats['sample_rates']))
+        stats['channels'] = sorted(list(stats['channels']))
+        stats['num_individuals'] = len(stats.get('individuals', {}))
+
+        self.logger.info(f"{dataset_name}: {stats['total_files']} files across {stats['num_individuals']} individuals")
+        return stats
+
+    def generate_combined_report(self, all_stats: Dict[str, Dict], output_path: str):
+        """
+        Generate a human-readable analysis report for multiple datasets.
+
+        Args:
+            all_stats: Dictionary mapping dataset keys to their statistics
+            output_path: Path to save report
+        """
+        report_lines = []
+        report_lines.append("=" * 80)
+        report_lines.append("DATASET ANALYSIS REPORT")
+        report_lines.append(f"Total Datasets: {len(all_stats)}")
+        report_lines.append("=" * 80)
+        report_lines.append("")
+
+        # Summary table
+        report_lines.append("SUMMARY")
+        report_lines.append("-" * 80)
+        report_lines.append(f"{'Dataset':<30} {'Files':<10} {'Individuals':<12} {'Duration (hrs)':<15}")
+        report_lines.append("-" * 80)
+
+        total_files = 0
+        total_individuals = 0
+        total_duration = 0.0
+
+        for dataset_key, stats in all_stats.items():
+            num_files = stats.get('total_files', 0)
+            num_individuals = stats.get('num_individuals', len(stats.get('individuals', {})))
+            duration_hrs = stats.get('total_duration', 0) / 3600
+
+            report_lines.append(f"{dataset_key:<30} {num_files:<10} {num_individuals:<12} {duration_hrs:<15.2f}")
+
+            total_files += num_files
+            total_individuals += num_individuals
+            total_duration += stats.get('total_duration', 0)
+
+        report_lines.append("-" * 80)
+        report_lines.append(f"{'TOTAL':<30} {total_files:<10} {total_individuals:<12} {total_duration/3600:<15.2f}")
+        report_lines.append("")
+
+        # Detailed sections for each dataset
+        for dataset_key, stats in all_stats.items():
+            report_lines.append("")
+            report_lines.append(f"{stats['dataset_name'].upper()}")
+            report_lines.append("-" * 80)
+            report_lines.append(f"Total files: {stats['total_files']}")
+            report_lines.append(f"Total duration: {stats.get('total_duration', 0) / 3600:.2f} hours")
+            report_lines.append(f"Sample rates: {stats.get('sample_rates', [])}")
+            report_lines.append(f"Channels: {stats.get('channels', [])}")
+
+            if 'individuals' in stats and stats['individuals']:
+                report_lines.append(f"\nIndividual breakdown ({len(stats['individuals'])} individuals):")
+                for ind_name, ind_info in list(stats['individuals'].items())[:20]:  # Show max 20
+                    avg_dur = ind_info.get('avg_duration', 0)
+                    num_files = ind_info.get('num_files', 0)
+                    report_lines.append(f"  {ind_name}: {num_files} files, avg duration {avg_dur:.2f}s")
+
+                if len(stats['individuals']) > 20:
+                    report_lines.append(f"  ... and {len(stats['individuals']) - 20} more individuals")
+            report_lines.append("")
+
+        report_lines.append("=" * 80)
+
+        # Save report
+        output_file = Path(output_path)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(output_file, 'w') as f:
+            f.write('\n'.join(report_lines))
+
+        self.logger.info(f"Report saved to {output_path}")
+
+        # Also print to console
+        print('\n'.join(report_lines))
+
     def save_analysis(self, stats: Dict, output_path: str):
         """
         Save analysis results to JSON file.

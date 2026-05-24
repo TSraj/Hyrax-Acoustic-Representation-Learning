@@ -95,6 +95,10 @@ def main():
     logger.info("SCRIPT 03: EXTRACT EMBEDDINGS")
     logger.info("=" * 80)
 
+    # Get active datasets from config
+    active_datasets = config['datasets'].get('active', [])
+    logger.info(f"\nProcessing {len(active_datasets)} datasets: {', '.join(active_datasets)}")
+
     # Set paths
     if config['subset']['enabled']:
         data_dir = Path(config['paths']['processed_dir']) / "preprocessed_subsets"
@@ -104,36 +108,67 @@ def main():
     output_dir = Path(config['paths']['embeddings_dir'])
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    timestamp = get_timestamp()
+    # Get models to use
+    models_to_use = ['wav2vec2_base', 'wav2vec2_xlsr', 'hubert_base', 'hubert_large']
+    logger.info(f"Models to extract: {', '.join(models_to_use)}")
 
-    # Extract features with wav2vec2-base
+    # Extract features for each model × dataset combination
+    for model_name in models_to_use:
+        logger.info("\n" + "=" * 80)
+        logger.info(f"MODEL: {model_name.upper()}")
+        logger.info("=" * 80)
+
+        # Create feature extractor
+        extractor = Wav2VecFeatureExtractor(
+            model_name,
+            config,
+            device=config['feature_extraction']['device'],
+            log_level=config['experiment']['log_level']
+        )
+
+        # Create pooler
+        pooler = FeaturePooler(config, config['experiment']['log_level'])
+
+        # Process each dataset
+        for dataset_key in active_datasets:
+            logger.info(f"\n{'='*60}")
+            logger.info(f"Processing: {dataset_key}")
+            logger.info(f"{'='*60}")
+
+            dataset_dir = data_dir / dataset_key
+
+            if not dataset_dir.exists():
+                logger.warning(f"Dataset directory not found: {dataset_dir}, skipping...")
+                continue
+
+            try:
+                # Extract features
+                logger.info(f"Extracting features from {dataset_dir}...")
+                features = extractor.extract_features_from_dataset(
+                    str(dataset_dir),
+                    extract_all_layers=config['feature_extraction']['extract_all_layers']
+                )
+
+                # Save raw features
+                features_output = output_dir / f"{dataset_key}_{model_name}_features.npz"
+                extractor.save_features(features, str(features_output))
+                logger.info(f"  Raw features saved: {features_output.name}")
+
+                # Pool features
+                logger.info(f"Pooling features...")
+                pooled_features = pooler.pool_dataset_features(features)
+                pooled_output = output_dir / f"{dataset_key}_{model_name}_pooled.npz"
+                pooler.save_pooled_features(pooled_features, str(pooled_output))
+                logger.info(f"  Pooled features saved: {pooled_output.name}")
+
+                logger.info(f"✓ {dataset_key} complete for {model_name}")
+
+            except Exception as e:
+                logger.error(f"Error extracting features for {dataset_key} with {model_name}: {e}")
+                continue
+
     logger.info("\n" + "=" * 80)
-    logger.info("MODEL 1: wav2vec2-base")
-    logger.info("=" * 80)
-
-    base_macaque, base_zebra = extract_and_pool_features(
-        config,
-        'wav2vec2_base',
-        data_dir,
-        output_dir,
-        logger
-    )
-
-    # Extract features with wav2vec2-xlsr
-    logger.info("\n" + "=" * 80)
-    logger.info("MODEL 2: wav2vec2-xls-r")
-    logger.info("=" * 80)
-
-    xlsr_macaque, xlsr_zebra = extract_and_pool_features(
-        config,
-        'wav2vec2_xlsr',
-        data_dir,
-        output_dir,
-        logger
-    )
-
-    logger.info("\n" + "=" * 80)
-    logger.info("Feature extraction complete for both models!")
+    logger.info("✓ Feature extraction complete for all models and datasets!")
     logger.info(f"Embeddings saved to: {output_dir}")
     logger.info("=" * 80)
 
