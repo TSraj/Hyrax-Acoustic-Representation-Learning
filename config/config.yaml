@@ -127,25 +127,9 @@ models:
     hidden_size: 1024
     description: "Multilingual model trained on 128 languages"
 
-  hubert_base:
-    name: "hubert-base-ls960"
-    model_id: "facebook/hubert-base-ls960"
-    num_layers: 12
-    hidden_size: 768
-    description: "HuBERT pretrained on LibriSpeech (960h)"
-    model_type: "hubert"
-
-  hubert_large:
-    name: "hubert-large-ls960-ft"
-    model_id: "facebook/hubert-large-ls960-ft"
-    num_layers: 24
-    hidden_size: 1024
-    description: "HuBERT Large pretrained and fine-tuned on LibriSpeech"
-    model_type: "hubert"
-
 # Feature extraction settings
 feature_extraction:
-  batch_size: 8
+  batch_size: 4  # Reduced from 8 to save memory (process fewer files at once)
   extract_all_layers: true  # Extract from all transformer layers
   layers_to_extract: null  # If null, extract all layers; otherwise specify list [0, 6, 11]
   device: "mps"  # "cuda" if GPU available, "mps" for Apple Silicon

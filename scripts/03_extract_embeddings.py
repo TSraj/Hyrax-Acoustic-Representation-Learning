@@ -110,7 +110,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Get models to use
-    models_to_use = ['wav2vec2_base', 'wav2vec2_xlsr', 'hubert_base', 'hubert_large']
+    models_to_use = ['wav2vec2_base', 'wav2vec2_xlsr']
     logger.info(f"Models to extract: {', '.join(models_to_use)}")
 
     # Extract features for each model × dataset combination
@@ -143,9 +143,9 @@ def main():
                 continue
 
             try:
-                # Extract features
-                logger.info(f"Extracting features from {dataset_dir}...")
-                features = extractor.extract_features_from_dataset(
+                # Extract features using layerwise method to save memory
+                logger.info(f"Extracting features from {dataset_dir} (layer-by-layer)...")
+                features = extractor.extract_features_from_dataset_layerwise(
                     str(dataset_dir),
                     extract_all_layers=config['feature_extraction']['extract_all_layers']
                 )

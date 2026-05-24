@@ -236,6 +236,91 @@ class Wav2VecFeatureExtractor:
             # Label is from filename (e.g., zebra_finch/HPiHPi4748_*.wav -> HPiHPi4748)
             return file_path.stem.split('_')[0]
 
+    def extract_features_from_dataset_layerwise(
+        self,
+        data_dir: str,
+        file_pattern: str = "**/*.wav",
+        extract_all_layers: bool = True,
+        layers: Optional[List[int]] = None
+    ) -> Dict:
+        """
+        Memory-efficient layer-by-layer feature extraction.
+        Extracts one layer at a time across all files to minimize memory usage.
+
+        Args:
+            data_dir: Directory containing audio files
+            file_pattern: Glob pattern for audio files
+            extract_all_layers: Whether to extract from all layers
+            layers: Specific layers to extract
+
+        Returns:
+            Dictionary containing features and metadata
+        """
+        import gc
+
+        data_path = Path(data_dir)
+        audio_files = sorted(list(data_path.glob(file_pattern)))
+
+        self.logger.info(f"Extracting features from {len(audio_files)} files (layer-by-layer mode)...")
+
+        # Determine which layers to extract
+        if extract_all_layers:
+            layer_indices = list(range(self.num_layers + 1))  # +1 includes embedding layer
+        elif layers is not None:
+            layer_indices = layers
+        else:
+            layer_indices = [self.num_layers]  # Last layer only
+
+        all_features = {}
+        metadata = {
+            'model_name': self.model_name,
+            'model_id': self.model_id,
+            'num_files': len(audio_files),
+            'layers': layer_indices,
+            'file_paths': [],
+            'labels': []
+        }
+
+        # Extract metadata first (labels and file paths)
+        for file_path in audio_files:
+            file_key = str(file_path.relative_to(data_path))
+            label = self._extract_label(file_path, data_path)
+            metadata['file_paths'].append(file_key)
+            metadata['labels'].append(label)
+            all_features[file_key] = {}
+
+        # Process one layer at a time across all files
+        for layer_idx in layer_indices:
+            self.logger.info(f"  Extracting layer {layer_idx}/{max(layer_indices)}...")
+
+            for file_path in tqdm(audio_files, desc=f"Layer {layer_idx}", leave=False):
+                try:
+                    file_key = str(file_path.relative_to(data_path))
+
+                    # Extract only this specific layer
+                    features = self.extract_features_from_file(
+                        str(file_path),
+                        extract_all_layers=False,
+                        layers=[layer_idx]
+                    )
+
+                    # Store only this layer's features
+                    if layer_idx in features:
+                        all_features[file_key][layer_idx] = features[layer_idx]
+
+                except Exception as e:
+                    self.logger.error(f"Error extracting layer {layer_idx} from {file_path}: {e}")
+
+            # Force garbage collection after each layer
+            gc.collect()
+
+        self.logger.info(f"Feature extraction complete: {len(all_features)} files, {len(layer_indices)} layers")
+
+        return {
+            'features': all_features,
+            'metadata': metadata
+        }
+
     def save_features(self, features_dict: Dict, output_path: str):
         """
         Save extracted features to disk.

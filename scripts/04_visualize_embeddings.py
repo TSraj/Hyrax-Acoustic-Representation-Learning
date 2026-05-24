@@ -135,7 +135,7 @@ def main():
 
     # Get active datasets and models from config
     active_datasets = config['datasets'].get('active', [])
-    models_to_visualize = ['wav2vec2_base', 'wav2vec2_xlsr', 'hubert_base', 'hubert_large']
+    models_to_visualize = ['wav2vec2_base', 'wav2vec2_xlsr']
 
     logger.info(f"\nDatasets: {', '.join(active_datasets)}")
     logger.info(f"Models: {', '.join(models_to_visualize)}")
