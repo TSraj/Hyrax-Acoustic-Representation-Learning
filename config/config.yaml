@@ -148,7 +148,7 @@ feature_extraction:
   batch_size: 8
   extract_all_layers: true  # Extract from all transformer layers
   layers_to_extract: null  # If null, extract all layers; otherwise specify list [0, 6, 11]
-  device: "cpu"  # "cuda" if GPU available, "mps" for Apple Silicon
+  device: "mps"  # "cuda" if GPU available, "mps" for Apple Silicon
   return_attention: false
 
 # Pooling strategies

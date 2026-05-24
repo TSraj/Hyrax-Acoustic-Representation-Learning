@@ -4,6 +4,7 @@ Script 03: Extract Embeddings
 Extracts wav2vec embeddings from preprocessed audio using both base and XLSR models.
 """
 
+import gc
 import yaml
 import sys
 from pathlib import Path
@@ -161,11 +162,20 @@ def main():
                 pooler.save_pooled_features(pooled_features, str(pooled_output))
                 logger.info(f"  Pooled features saved: {pooled_output.name}")
 
+                # Free raw features immediately after pooling
+                del features, pooled_features
+                gc.collect()
+
                 logger.info(f"✓ {dataset_key} complete for {model_name}")
 
             except Exception as e:
                 logger.error(f"Error extracting features for {dataset_key} with {model_name}: {e}")
                 continue
+
+        # Free model from memory before loading the next one
+        del extractor, pooler
+        gc.collect()
+        logger.info(f"Model {model_name} unloaded from memory.")
 
     logger.info("\n" + "=" * 80)
     logger.info("✓ Feature extraction complete for all models and datasets!")
