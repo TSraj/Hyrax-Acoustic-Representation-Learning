@@ -213,8 +213,9 @@ class DatasetAnalyzer:
         subdirs = [d for d in dataset_path.iterdir() if d.is_dir() and not d.name.startswith('.')]
 
         if not subdirs:
-            # No subdirectories, might be flat structure - just scan for wav files
-            audio_files = list(dataset_path.glob("**/*.wav"))
+            # No subdirectories, might be flat structure - scan for all audio formats
+            audio_files = [f for ext in ('*.wav', '*.mp3', '*.flac', '*.WAV', '*.MP3', '*.FLAC')
+                           for f in dataset_path.glob(f"**/{ext}")]
             stats['total_files'] = len(audio_files)
             stats['structure'] = 'flat'
 
@@ -238,7 +239,8 @@ class DatasetAnalyzer:
 
             for individual_dir in subdirs:
                 individual_name = individual_dir.name
-                audio_files = list(individual_dir.glob("**/*.wav"))
+                audio_files = [f for ext in ('*.wav', '*.mp3', '*.flac', '*.WAV', '*.MP3', '*.FLAC')
+                               for f in individual_dir.glob(f"**/{ext}")]
 
                 if not audio_files:
                     continue

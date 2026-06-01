@@ -37,7 +37,8 @@ class ProsodicFeatureExtractor:
         frame_length: int = 2048,
         fmin: float = 50.0,
         fmax: float = 8000.0,
-        n_statistics: int = 10
+        n_statistics: int = 10,
+        max_duration: Optional[float] = None,
     ):
         """
         Initialize prosodic feature extractor.
@@ -56,6 +57,7 @@ class ProsodicFeatureExtractor:
         self.fmin = fmin
         self.fmax = fmax
         self.n_statistics = n_statistics
+        self.max_duration = max_duration
 
         logger.info(f"Initialized ProsodicFeatureExtractor (sr={sample_rate})")
 
@@ -311,6 +313,10 @@ class ProsodicFeatureExtractor:
                     import librosa
                     audio = librosa.resample(audio, orig_sr=sr, target_sr=self.sample_rate)
 
+                # Truncate to max_duration to keep pyin() fast on long files
+                if self.max_duration is not None:
+                    audio = audio[:int(self.max_duration * self.sample_rate)]
+
                 # Extract features
                 result = self.extract(audio)
                 features_list.append(result['features'])
@@ -334,12 +340,13 @@ class ProsodicFeatureExtractor:
                 f"n_features={self.get_num_features()})")
 
 
-def create_default_prosodic_extractor(sample_rate: int = 16000) -> ProsodicFeatureExtractor:
+def create_default_prosodic_extractor(sample_rate: int = 16000, max_duration: Optional[float] = None) -> ProsodicFeatureExtractor:
     """
     Create prosodic feature extractor with default settings.
 
     Args:
         sample_rate: Audio sample rate
+        max_duration: Truncate audio to this many seconds before extraction (None = no limit)
 
     Returns:
         Configured ProsodicFeatureExtractor instance
@@ -350,5 +357,6 @@ def create_default_prosodic_extractor(sample_rate: int = 16000) -> ProsodicFeatu
         frame_length=2048,
         fmin=50.0,
         fmax=8000.0,
-        n_statistics=10
+        n_statistics=10,
+        max_duration=max_duration
     )

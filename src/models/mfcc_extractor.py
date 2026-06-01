@@ -44,6 +44,7 @@ class MFCCExtractor:
         window: str = 'hamming',
         include_deltas: bool = True,
         include_delta_deltas: bool = True,
+        max_duration: Optional[float] = None,
     ):
         """
         Initialize MFCC extractor.
@@ -70,6 +71,7 @@ class MFCCExtractor:
         self.window = window
         self.include_deltas = include_deltas
         self.include_delta_deltas = include_delta_deltas
+        self.max_duration = max_duration
 
         # Calculate expected feature dimension
         self.feature_dim = n_mfcc
@@ -149,7 +151,8 @@ class MFCCExtractor:
             MFCC features of shape (n_frames, feature_dim)
         """
         # Load audio
-        audio, sr = librosa.load(audio_path, sr=self.sample_rate, mono=True)
+        audio, sr = librosa.load(audio_path, sr=self.sample_rate, mono=True,
+                                  duration=self.max_duration)
 
         # Extract features
         features = self.extract_from_audio(audio, sr)
@@ -289,12 +292,13 @@ class MFCCExtractor:
                 f"feature_dim={self.feature_dim})")
 
 
-def create_default_mfcc_extractor(sample_rate: int = 16000) -> MFCCExtractor:
+def create_default_mfcc_extractor(sample_rate: int = 16000, max_duration: Optional[float] = None) -> MFCCExtractor:
     """
     Create MFCC extractor with standard configuration.
 
     Args:
         sample_rate: Target sampling rate
+        max_duration: Truncate audio to this many seconds before extraction (None = no limit)
 
     Returns:
         Configured MFCCExtractor instance
@@ -306,5 +310,6 @@ def create_default_mfcc_extractor(sample_rate: int = 16000) -> MFCCExtractor:
         hop_length=256,  # Reduced for short audio
         n_mels=128,
         include_deltas=True,
-        include_delta_deltas=False  # Disabled for very short audio
+        include_delta_deltas=False,  # Disabled for very short audio
+        max_duration=max_duration
     )

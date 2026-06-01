@@ -141,10 +141,15 @@ class Wav2VecFeatureExtractor:
         Returns:
             Dictionary mapping layer index to feature array
         """
-        # Load audio
         audio, sr = load_audio(file_path, target_sr=16000, mono=True)
 
-        # Extract features
+        # Truncate long files to prevent OOM — attention is O(n²) in sequence length
+        max_duration = self.config.get('feature_extraction', {}).get('max_audio_duration', None)
+        if max_duration is not None:
+            max_samples = int(max_duration * sr)
+            if len(audio) > max_samples:
+                audio = audio[:max_samples]
+
         return self.extract_features_from_audio(audio, sr, extract_all_layers, layers)
 
     def extract_features_from_dataset(
@@ -320,6 +325,88 @@ class Wav2VecFeatureExtractor:
             'features': all_features,
             'metadata': metadata
         }
+
+    def extract_and_pool_from_dataset(
+        self,
+        data_dir: str,
+        pooling_methods: List[str],
+        file_pattern: str = "**/*.wav",
+        extract_all_layers: bool = True,
+        layers: Optional[List[int]] = None
+    ) -> Dict:
+        """
+        Extract features and pool immediately per file to avoid holding raw activations in RAM.
+
+        One forward pass per file: hidden states are pooled on the spot and discarded,
+        so peak memory is one file's activations rather than the entire dataset's.
+
+        Returns the same structure as FeaturePooler.pool_dataset_features so
+        FeaturePooler.save_pooled_features works without modification.
+        """
+        data_path = Path(data_dir)
+        audio_files = sorted(list(data_path.glob(file_pattern)))
+        self.logger.info(f"Extracting+pooling {len(audio_files)} files (memory-efficient, 1 pass/file)...")
+
+        pool_fns = {
+            'mean':  lambda x: np.mean(x, axis=0),
+            'max':   lambda x: np.max(x, axis=0),
+            'first': lambda x: x[0],
+            'last':  lambda x: x[-1],
+        }
+
+        result = {method: {'features': {}, 'metadata': None} for method in pooling_methods}
+        file_paths = []
+        labels = []
+
+        for i, file_path in enumerate(tqdm(audio_files, desc=f"Extract+pool ({self.model_name})")):
+            try:
+                file_key = str(file_path.relative_to(data_path))
+                label = self._extract_label(file_path, data_path)
+                file_paths.append(file_key)
+                labels.append(label)
+
+                # Single forward pass — all hidden states for this file
+                raw = self.extract_features_from_file(str(file_path), extract_all_layers, layers)
+
+                # Pool every layer for every method, then free raw activations
+                for method in pooling_methods:
+                    fn = pool_fns.get(method, pool_fns['mean'])
+                    result[method]['features'][file_key] = {
+                        layer_idx: fn(layer_data)
+                        for layer_idx, layer_data in raw.items()
+                    }
+                del raw
+
+                # Periodically release MPS cached memory — MPS holds freed tensors
+                # in an allocator cache and won't release them without an explicit call
+                if (i + 1) % 100 == 0:
+                    import gc
+                    gc.collect()
+                    if torch.backends.mps.is_available():
+                        torch.mps.empty_cache()
+
+            except Exception as e:
+                self.logger.error(f"Error on {file_path.name}: {e}")
+
+        layer_indices = []
+        for method_data in result.values():
+            if method_data['features']:
+                layer_indices = sorted(next(iter(method_data['features'].values())).keys())
+                break
+
+        metadata = {
+            'model_name': self.model_name,
+            'model_id': self.model_id,
+            'num_files': len(file_paths),
+            'layers': layer_indices,
+            'file_paths': file_paths,
+            'labels': labels,
+        }
+        for method in pooling_methods:
+            result[method]['metadata'] = metadata.copy()
+
+        self.logger.info(f"Done: {len(file_paths)} files, {len(layer_indices)} layers")
+        return result
 
     def save_features(self, features_dict: Dict, output_path: str):
         """

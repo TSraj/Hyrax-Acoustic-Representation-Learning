@@ -46,6 +46,7 @@ class SpectralExtractor:
         window: str = 'hamming',
         include_chroma: bool = True,
         include_contrast: bool = True,
+        max_duration: Optional[float] = None,
     ):
         """
         Initialize spectral feature extractor.
@@ -68,6 +69,7 @@ class SpectralExtractor:
         self.window = window
         self.include_chroma = include_chroma
         self.include_contrast = include_contrast
+        self.max_duration = max_duration
 
         # Calculate expected feature dimension
         self.feature_dim = self._calculate_feature_dim()
@@ -205,7 +207,8 @@ class SpectralExtractor:
             Spectral features of shape (n_frames, feature_dim)
         """
         # Load audio
-        audio, sr = librosa.load(audio_path, sr=self.sample_rate, mono=True)
+        audio, sr = librosa.load(audio_path, sr=self.sample_rate, mono=True,
+                                  duration=self.max_duration)
 
         # Extract features
         features = self.extract_from_audio(audio, sr)
@@ -347,12 +350,13 @@ class SpectralExtractor:
                 f"feature_dim={self.feature_dim})")
 
 
-def create_default_spectral_extractor(sample_rate: int = 16000) -> SpectralExtractor:
+def create_default_spectral_extractor(sample_rate: int = 16000, max_duration: Optional[float] = None) -> SpectralExtractor:
     """
     Create spectral extractor with standard configuration.
 
     Args:
         sample_rate: Target sampling rate
+        max_duration: Truncate audio to this many seconds before extraction (None = no limit)
 
     Returns:
         Configured SpectralExtractor instance
@@ -364,5 +368,6 @@ def create_default_spectral_extractor(sample_rate: int = 16000) -> SpectralExtra
         n_chroma=12,
         n_contrast_bands=6,
         include_chroma=True,
-        include_contrast=True
+        include_contrast=True,
+        max_duration=max_duration
     )

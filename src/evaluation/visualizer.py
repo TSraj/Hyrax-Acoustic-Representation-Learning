@@ -120,6 +120,11 @@ class EmbeddingVisualizer:
         tsne_config = self.viz_config['methods']['tsne'].copy()
         tsne_config.pop('n_components', None)  # Remove to avoid duplicate
         tsne_config.pop('enabled', None)  # Remove non-TSNE parameter
+        # sklearn 1.4+ renamed n_iter -> max_iter; remap for backwards compat
+        if 'n_iter' in tsne_config and 'max_iter' not in tsne_config:
+            tsne_config['max_iter'] = tsne_config.pop('n_iter')
+        else:
+            tsne_config.pop('n_iter', None)
         tsne = TSNE(n_components=n_components, **{**tsne_config, **kwargs})
         reduced = tsne.fit_transform(features)
 

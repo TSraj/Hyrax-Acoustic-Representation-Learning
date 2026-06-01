@@ -143,27 +143,21 @@ def main():
                 continue
 
             try:
-                # Extract features using layerwise method to save memory
-                logger.info(f"Extracting features from {dataset_dir} (layer-by-layer)...")
-                features = extractor.extract_features_from_dataset_layerwise(
+                # Extract and pool in one pass — never holds raw activations in RAM
+                logger.info(f"Extracting features from {dataset_dir}...")
+                pooling_methods = config['pooling']['methods']
+                pooled_features = extractor.extract_and_pool_from_dataset(
                     str(dataset_dir),
+                    pooling_methods=pooling_methods,
                     extract_all_layers=config['feature_extraction']['extract_all_layers']
                 )
 
-                # Save raw features
-                features_output = output_dir / f"{dataset_key}_{model_name}_features.npz"
-                extractor.save_features(features, str(features_output))
-                logger.info(f"  Raw features saved: {features_output.name}")
-
-                # Pool features
-                logger.info(f"Pooling features...")
-                pooled_features = pooler.pool_dataset_features(features)
+                # Save pooled features
                 pooled_output = output_dir / f"{dataset_key}_{model_name}_pooled.npz"
                 pooler.save_pooled_features(pooled_features, str(pooled_output))
                 logger.info(f"  Pooled features saved: {pooled_output.name}")
 
-                # Free raw features immediately after pooling
-                del features, pooled_features
+                del pooled_features
                 gc.collect()
 
                 logger.info(f"✓ {dataset_key} complete for {model_name}")

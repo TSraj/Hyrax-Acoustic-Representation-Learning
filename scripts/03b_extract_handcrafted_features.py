@@ -52,6 +52,7 @@ def load_config(config_path: Path) -> dict:
 
 def collect_audio_files(
     data_dir: Path,
+    dataset_key: str,
     dataset_config: dict,
     subset_enabled: bool
 ) -> Tuple[List[Path], List[str]]:
@@ -60,6 +61,7 @@ def collect_audio_files(
 
     Args:
         data_dir: Root data directory
+        dataset_key: Config key for the dataset (e.g. 'macaque', 'wetlands_bird')
         dataset_config: Dataset configuration
         subset_enabled: Whether subset mode is enabled
 
@@ -70,25 +72,19 @@ def collect_audio_files(
     audio_paths = []
     labels = []
 
+    # Use dataset_key directly — matches the folder name created by script 02
     if subset_enabled:
-        # Use preprocessed subsets
-        # Convert dataset name to lowercase with underscore (e.g., "Macaque" -> "macaque", "Zebra finch" -> "zebra_finch")
-        dataset_folder = dataset_config['path'].split('/')[-1].lower().replace(' ', '_')
-        subset_dir = data_dir / "processed" / "preprocessed_subsets" / dataset_folder
+        subset_dir = data_dir / "processed" / "preprocessed_subsets" / dataset_key
     else:
-        # Use full preprocessed dataset
-        dataset_folder = dataset_config['path'].split('/')[-1].lower().replace(' ', '_')
-        subset_dir = data_dir / "processed" / "preprocessed_full" / dataset_folder
+        subset_dir = data_dir / "processed" / "preprocessed_full" / dataset_key
 
     if not subset_dir.exists():
         logger.warning(f"Directory not found: {subset_dir}")
         return [], []
 
-    # Check dataset structure type
     if 'individuals' in dataset_config:
-        # Structure 1: Individual folders (Macaque-style)
-        # dataset/Individual1/file.wav
-        logger.info(f"Using individual-folder structure for {dataset_config.get('name', 'dataset')}")
+        # Explicit individual list in config (macaque-style)
+        logger.info(f"Using explicit individual-folder structure for {dataset_config.get('name', 'dataset')}")
 
         for individual in dataset_config['individuals']:
             individual_dir = subset_dir / individual
@@ -96,19 +92,14 @@ def collect_audio_files(
                 logger.warning(f"Individual directory not found: {individual_dir}")
                 continue
 
-            # Get all audio files
-            audio_files = list(individual_dir.glob("*.wav"))
-
-            for audio_file in audio_files:
+            for audio_file in sorted(individual_dir.glob("**/*.wav")):
                 audio_paths.append(audio_file)
                 labels.append(individual)
 
     elif 'subdirs' in dataset_config:
-        # Structure 2: Subdirectory with individual IDs in filenames (Zebra finch-style)
-        # dataset/AdultVocalizations/Individual1_file.wav
+        # Subdirectory with individual IDs in filenames (zebra_finch-style)
         logger.info(f"Using subdirectory structure for {dataset_config.get('name', 'dataset')}")
 
-        # Get subdirectory (e.g., "AdultVocalizations")
         subdir_name = dataset_config['subdirs'].get('adult', 'AdultVocalizations')
         files_dir = subset_dir / subdir_name
 
@@ -116,21 +107,24 @@ def collect_audio_files(
             logger.warning(f"Subdirectory not found: {files_dir}")
             return [], []
 
-        # Get all audio files
-        audio_files = list(files_dir.glob("*.wav"))
-
-        # Extract individual ID from filename (before first underscore)
-        for audio_file in audio_files:
-            filename = audio_file.stem  # Filename without extension
-            # Individual ID is before first underscore (e.g., "BluRas61dd_110406" -> "BluRas61dd")
-            individual = filename.split('_')[0] if '_' in filename else filename
-
+        for audio_file in sorted(files_dir.glob("**/*.wav")):
+            individual = audio_file.stem.split('_')[0] if '_' in audio_file.stem else audio_file.stem
             audio_paths.append(audio_file)
             labels.append(individual)
 
     else:
-        logger.warning(f"Unknown dataset structure for {dataset_config.get('name', 'dataset')}")
-        return [], []
+        # Generic: each subdirectory is an individual (anuraset, bengalese_finch, etc.)
+        logger.info(f"Using generic subdirectory structure for {dataset_config.get('name', 'dataset')}")
+
+        subdirs = sorted([d for d in subset_dir.iterdir() if d.is_dir() and not d.name.startswith('.')])
+        if not subdirs:
+            logger.warning(f"No subdirectories found in {subset_dir}")
+            return [], []
+
+        for individual_dir in subdirs:
+            for audio_file in sorted(individual_dir.glob("**/*.wav")):
+                audio_paths.append(audio_file)
+                labels.append(individual_dir.name)
 
     logger.info(f"Collected {len(audio_paths)} audio files with {len(set(labels))} unique labels")
 
@@ -138,19 +132,22 @@ def collect_audio_files(
 
 
 def extract_features_for_dataset(
+    dataset_key: str,
     dataset_name: str,
     dataset_config: dict,
     data_dir: Path,
     output_dir: Path,
     sample_rate: int,
     subset_enabled: bool,
-    pooling_methods: List[str]
+    pooling_methods: List[str],
+    max_audio_duration: float = None,
 ) -> None:
     """
     Extract handcrafted features for one dataset.
 
     Args:
-        dataset_name: Name of the dataset
+        dataset_key: Config key for the dataset (e.g. 'macaque')
+        dataset_name: Human-readable name of the dataset
         dataset_config: Dataset configuration
         data_dir: Root data directory
         output_dir: Output directory for features
@@ -163,7 +160,7 @@ def extract_features_for_dataset(
     logger.info(f"{'='*60}")
 
     # Collect audio files
-    audio_paths, labels = collect_audio_files(data_dir, dataset_config, subset_enabled)
+    audio_paths, labels = collect_audio_files(data_dir, dataset_key, dataset_config, subset_enabled)
 
     if len(audio_paths) == 0:
         logger.warning(f"No audio files found for {dataset_name}, skipping...")
@@ -171,9 +168,9 @@ def extract_features_for_dataset(
 
     # Create extractors
     logger.info("Initializing feature extractors...")
-    mfcc_extractor = create_default_mfcc_extractor(sample_rate=sample_rate)
-    spectral_extractor = create_default_spectral_extractor(sample_rate=sample_rate)
-    prosodic_extractor = create_default_prosodic_extractor(sample_rate=sample_rate)
+    mfcc_extractor = create_default_mfcc_extractor(sample_rate=sample_rate, max_duration=max_audio_duration)
+    spectral_extractor = create_default_spectral_extractor(sample_rate=sample_rate, max_duration=max_audio_duration)
+    prosodic_extractor = create_default_prosodic_extractor(sample_rate=sample_rate, max_duration=max_audio_duration)
 
     # Extract features with different pooling methods
     for pooling_method in pooling_methods:
@@ -322,6 +319,7 @@ def main():
     sample_rate = config['preprocessing']['target_sample_rate']
     subset_enabled = config['subset']['enabled']
     pooling_methods = [method for method in config['pooling']['methods']]
+    max_audio_duration = config.get('feature_extraction', {}).get('max_audio_duration', None)
 
     logger.info(f"\nConfiguration:")
     logger.info(f"  Data directory: {data_dir}")
@@ -333,32 +331,30 @@ def main():
     # Create output directory
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Process each dataset
+    # Process all active datasets from config
+    active_datasets = config['datasets'].get('active', [])
     datasets = config['datasets']
 
-    # Process Macaque dataset
-    if 'macaque' in datasets:
-        extract_features_for_dataset(
-            dataset_name='macaque',
-            dataset_config=datasets['macaque'],
-            data_dir=data_dir,
-            output_dir=output_dir,
-            sample_rate=sample_rate,
-            subset_enabled=subset_enabled,
-            pooling_methods=pooling_methods
-        )
+    logger.info(f"\nProcessing {len(active_datasets)} datasets: {', '.join(active_datasets)}")
 
-    # Process Zebra Finch dataset
-    if 'zebra_finch' in datasets:
+    for dataset_key in active_datasets:
+        dataset_config = datasets.get(dataset_key)
+        if not dataset_config:
+            logger.warning(f"Dataset '{dataset_key}' not found in config, skipping...")
+            continue
+
         extract_features_for_dataset(
-            dataset_name='zebra_finch',
-            dataset_config=datasets['zebra_finch'],
+            dataset_key=dataset_key,
+            dataset_name=dataset_config.get('name', dataset_key),
+            dataset_config=dataset_config,
             data_dir=data_dir,
             output_dir=output_dir,
             sample_rate=sample_rate,
             subset_enabled=subset_enabled,
-            pooling_methods=pooling_methods
+            pooling_methods=pooling_methods,
+            max_audio_duration=max_audio_duration,
         )
+        gc.collect()
 
     logger.info("\n" + "="*60)
     logger.info("Handcrafted feature extraction complete!")
