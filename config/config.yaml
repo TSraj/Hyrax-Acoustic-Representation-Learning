@@ -357,3 +357,13 @@ memory:
 computation:
   n_jobs: -1  # Use all available cores for parallel processing
   verbose: 1
+
+# Phase 2 model configuration
+phase2:
+  models:
+    # ALL 5 MODELS ACTIVE FOR HPC RUN
+    - wav2vec2_base              # Wav2Vec2 Base (pretrained-only, no ASR)
+    - wav2vec2_base_960h         # Wav2Vec2 Base (ASR fine-tuned on 960h English)
+    - xls_r                      # XLS-R 300M (multilingual, 128 languages)
+    - wavlm                      # WavLM Base+
+    - ecapa_tdnn                 # ECAPA-TDNN (speaker verification)
