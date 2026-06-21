@@ -1,6 +1,6 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=p2-manifests
+#SBATCH --job-name=p2-report
 #SBATCH --output=logs/out_%j.out
 #SBATCH --error=logs/err_%j.err
 #SBATCH --time=24:00:00
@@ -28,20 +28,19 @@ export http_proxy=http://proxy:80
 export https_proxy=http://proxy:80
 
 # -----------------------------------------------------------
-# Stage 1: Create & Validate Manifests
-# Outputs: outputs/phase2/manifests/
+# Stage 7: Generate Final Report
+# Needs:   All previous stage outputs (jobs 1-6)
+# Outputs: outputs/phase2/final_report/
 # -----------------------------------------------------------
 
 echo "========================================"
-echo "Stage 1: Create & Validate Manifests"
+echo "Stage 7: Generate Final Report"
 echo "Started: $(date)"
-echo "Working dir: $(pwd)"
 echo "========================================"
 
-python3 scripts/phase2_01_create_manifests.py
-echo ">>> Manifests created: $(date)"
+python3 scripts/phase2_07_generate_final_report.py
+echo ">>> Final report generated: $(date)"
 
-python3 scripts/phase2_01b_validate_manifests.py
-echo ">>> Manifests validated: $(date)"
-
-echo "Stage 1 complete: $(date)"
+echo "========================================"
+echo "Phase 2 Pipeline COMPLETE: $(date)"
+echo "========================================"

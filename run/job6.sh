@@ -1,6 +1,6 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=p2-manifests
+#SBATCH --job-name=p2-samplerate
 #SBATCH --output=logs/out_%j.out
 #SBATCH --error=logs/err_%j.err
 #SBATCH --time=24:00:00
@@ -28,20 +28,17 @@ export http_proxy=http://proxy:80
 export https_proxy=http://proxy:80
 
 # -----------------------------------------------------------
-# Stage 1: Create & Validate Manifests
-# Outputs: outputs/phase2/manifests/
+# Stage 6: Sampling Rate Experiment (ResNet-18 on mel spectrograms)
+# Needs:   outputs/phase2/manifests/  (from job1)
+# Outputs: outputs/phase2/sampling_rate/
 # -----------------------------------------------------------
 
 echo "========================================"
-echo "Stage 1: Create & Validate Manifests"
+echo "Stage 6: Sampling Rate Experiment"
 echo "Started: $(date)"
-echo "Working dir: $(pwd)"
 echo "========================================"
 
-python3 scripts/phase2_01_create_manifests.py
-echo ">>> Manifests created: $(date)"
+python3 scripts/phase2_06_sampling_rate_experiment.py
+echo ">>> Sampling rate experiment complete: $(date)"
 
-python3 scripts/phase2_01b_validate_manifests.py
-echo ">>> Manifests validated: $(date)"
-
-echo "Stage 1 complete: $(date)"
+echo "Stage 6 complete: $(date)"

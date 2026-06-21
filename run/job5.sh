@@ -1,10 +1,6 @@
 #!/bin/bash -l
-# ============================================================
-# sample.sh — SLURM job sample script
-# Usage: sbatch run/sample.sh
-# ============================================================
 
-#SBATCH --job-name=sample-job
+#SBATCH --job-name=p2-finetune
 #SBATCH --output=logs/out_%j.out
 #SBATCH --error=logs/err_%j.err
 #SBATCH --time=24:00:00
@@ -22,6 +18,7 @@
 # -----------------------------------------------------------
 
 unset SLURM_EXPORT_ENV
+cd "$SLURM_SUBMIT_DIR"
 
 module purge
 module load python/3.12-conda
@@ -30,5 +27,18 @@ source venv/bin/activate
 export http_proxy=http://proxy:80
 export https_proxy=http://proxy:80
 
+# -----------------------------------------------------------
+# Stage 5: Fine-Tuning the Best Model (first 4 layers)
+# Needs:   outputs/phase2/model_selection/  (from job4)
+# Outputs: outputs/phase2/fine_tuning/
+# -----------------------------------------------------------
 
-python3 scripts/phase2_01_create_manifests.py 
+echo "========================================"
+echo "Stage 5: Fine-Tuning Best Model"
+echo "Started: $(date)"
+echo "========================================"
+
+python3 scripts/phase2_05_fine_tuning.py
+echo ">>> Fine-tuning complete: $(date)"
+
+echo "Stage 5 complete: $(date)"

@@ -1,6 +1,6 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=p2-manifests
+#SBATCH --job-name=p2-pooled
 #SBATCH --output=logs/out_%j.out
 #SBATCH --error=logs/err_%j.err
 #SBATCH --time=24:00:00
@@ -28,20 +28,20 @@ export http_proxy=http://proxy:80
 export https_proxy=http://proxy:80
 
 # -----------------------------------------------------------
-# Stage 1: Create & Validate Manifests
-# Outputs: outputs/phase2/manifests/
+# Stage 3: Pooled Zero-Shot Evaluation — All 5 Models on combined dataset
+# Needs:   outputs/phase2/manifests/  (from job1)
+# Outputs: outputs/phase2/zero_shot/pooled/
 # -----------------------------------------------------------
 
 echo "========================================"
-echo "Stage 1: Create & Validate Manifests"
+echo "Stage 3: Pooled Zero-Shot Evaluation"
 echo "Started: $(date)"
-echo "Working dir: $(pwd)"
 echo "========================================"
 
-python3 scripts/phase2_01_create_manifests.py
-echo ">>> Manifests created: $(date)"
+bash scripts/phase2_03_run_pooled_all_models.sh
+echo ">>> All 5 pooled evaluations done: $(date)"
 
-python3 scripts/phase2_01b_validate_manifests.py
-echo ">>> Manifests validated: $(date)"
+python3 scripts/phase2_03_aggregate_pooled_results.py
+echo ">>> Pooled results aggregated: $(date)"
 
-echo "Stage 1 complete: $(date)"
+echo "Stage 3 complete: $(date)"

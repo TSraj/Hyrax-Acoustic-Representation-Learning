@@ -1,6 +1,6 @@
 #!/bin/bash -l
 
-#SBATCH --job-name=p2-manifests
+#SBATCH --job-name=p2-model-select
 #SBATCH --output=logs/out_%j.out
 #SBATCH --error=logs/err_%j.err
 #SBATCH --time=24:00:00
@@ -28,20 +28,18 @@ export http_proxy=http://proxy:80
 export https_proxy=http://proxy:80
 
 # -----------------------------------------------------------
-# Stage 1: Create & Validate Manifests
-# Outputs: outputs/phase2/manifests/
+# Stage 4: Model Comparison & Selection
+# Needs:   outputs/phase2/zero_shot/per_dataset/  (from job2)
+#          outputs/phase2/zero_shot/pooled/        (from job3)
+# Outputs: outputs/phase2/model_selection/
 # -----------------------------------------------------------
 
 echo "========================================"
-echo "Stage 1: Create & Validate Manifests"
+echo "Stage 4: Model Comparison & Selection"
 echo "Started: $(date)"
-echo "Working dir: $(pwd)"
 echo "========================================"
 
-python3 scripts/phase2_01_create_manifests.py
-echo ">>> Manifests created: $(date)"
+python3 scripts/phase2_04_model_selection.py
+echo ">>> Best model selected: $(date)"
 
-python3 scripts/phase2_01b_validate_manifests.py
-echo ">>> Manifests validated: $(date)"
-
-echo "Stage 1 complete: $(date)"
+echo "Stage 4 complete: $(date)"
