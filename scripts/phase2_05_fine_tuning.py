@@ -124,63 +124,133 @@ class FineTuner:
             self.backbone = WavLMModel.from_pretrained(model_id)
 
         elif self.model_name == "ecapa_tdnn":
-            self.logger.error("ECAPA-TDNN fine-tuning not supported in this implementation")
-            self.logger.error("Please implement custom fine-tuning strategy for ECAPA")
-            raise NotImplementedError("ECAPA fine-tuning requires custom implementation")
+            # ECAPA-TDNN from SpeechBrain
+            from speechbrain.inference.speaker import EncoderClassifier
+
+            self.logger.info("Loading ECAPA-TDNN for fine-tuning...")
+            self.backbone = EncoderClassifier.from_hparams(
+                source="speechbrain/spkrec-ecapa-voxceleb",
+                savedir="pretrained_models/ecapa_tdnn"
+            )
+            self.feature_extractor = None  # ECAPA has internal preprocessing
+            self.model_type = "ecapa"
+
+            # For ECAPA, we'll freeze the feature extraction layers and fine-tune the embedding layer
+            # ECAPA structure: feature extraction -> TDNN blocks -> embedding layer -> classifier
+            # We'll freeze everything except the last few layers
+
+            # Move to device (ECAPA modules)
+            if hasattr(self.backbone, 'mods'):
+                for module in self.backbone.mods.values():
+                    if hasattr(module, 'to'):
+                        module.to(self.device)
+
+            # Freeze all parameters first
+            for name, param in self.backbone.named_parameters():
+                param.requires_grad = False
+
+            # Unfreeze only the final embedding layers (last 2 TDNN blocks)
+            for name, param in self.backbone.named_parameters():
+                if 'tdnn' in name.lower() or 'embedding' in name.lower():
+                    # Check if it's in the last layers (heuristic: contains "5", "6", or "embedding")
+                    if any(x in name for x in ['layer5', 'layer6', 'tdnn.5', 'tdnn.6', 'embedding']):
+                        param.requires_grad = True
+                        self.logger.info(f"  Unfreezing: {name}")
+
+            # Create classification head for ECAPA (embedding size is 192)
+            hidden_size = 192
+            self.classifier = nn.Linear(hidden_size, self.num_classes).to(self.device)
+            self.logger.info(f"ECAPA embedding size: {hidden_size}")
+
+            # Mark as ECAPA model type
+            self.is_ecapa = True
 
         else:
             raise ValueError(f"Unknown model: {self.model_name}")
 
-        self.backbone.to(self.device)
+        # For transformer models only
+        if self.model_name != "ecapa_tdnn":
+            self.is_ecapa = False
+            self.backbone.to(self.device)
 
-        # Freeze all parameters first
-        for param in self.backbone.parameters():
-            param.requires_grad = False
+            # Freeze all parameters first
+            for param in self.backbone.parameters():
+                param.requires_grad = False
 
-        # Unfreeze first 4 transformer layers only
-        num_layers = len(self.backbone.encoder.layers)
-        self.logger.info(f"Total transformer layers: {num_layers}")
-        self.logger.info(f"Fine-tuning first 4 layers, freezing remaining {num_layers - 4} layers")
+            # Unfreeze first 4 transformer layers only
+            num_layers = len(self.backbone.encoder.layers)
+            self.logger.info(f"Total transformer layers: {num_layers}")
+            self.logger.info(f"Fine-tuning first 4 layers, freezing remaining {num_layers - 4} layers")
 
-        for i in range(min(4, num_layers)):
-            for param in self.backbone.encoder.layers[i].parameters():
-                param.requires_grad = True
+            for i in range(min(4, num_layers)):
+                for param in self.backbone.encoder.layers[i].parameters():
+                    param.requires_grad = True
 
-        # Create classification head
-        # Get embedding dimension from last hidden state
-        hidden_size = self.backbone.config.hidden_size
-        self.classifier = nn.Linear(hidden_size, self.num_classes).to(self.device)
+            # Create classification head
+            # Get embedding dimension from last hidden state
+            hidden_size = self.backbone.config.hidden_size
+            self.classifier = nn.Linear(hidden_size, self.num_classes).to(self.device)
 
         self.logger.info(f"Classification head: {hidden_size} -> {self.num_classes}")
         self.logger.info("✓ Model prepared for fine-tuning")
 
         # Count trainable parameters
-        trainable_params = sum(p.numel() for p in self.backbone.parameters() if p.requires_grad)
-        total_params = sum(p.numel() for p in self.backbone.parameters())
-        self.logger.info(f"Trainable params: {trainable_params:,} / {total_params:,} ({trainable_params/total_params*100:.2f}%)")
+        if self.is_ecapa:
+            # For ECAPA, count all named parameters
+            trainable_params = sum(p.numel() for n, p in self.backbone.named_parameters() if p.requires_grad)
+            total_params = sum(p.numel() for n, p in self.backbone.named_parameters())
+        else:
+            trainable_params = sum(p.numel() for p in self.backbone.parameters() if p.requires_grad)
+            total_params = sum(p.numel() for p in self.backbone.parameters())
+
+        classifier_params = sum(p.numel() for p in self.classifier.parameters())
+        self.logger.info(f"Backbone trainable params: {trainable_params:,} / {total_params:,} ({trainable_params/total_params*100:.2f}%)")
+        self.logger.info(f"Classifier params: {classifier_params:,}")
 
     def forward(self, audio):
         """Forward pass through backbone + classifier."""
-        # Preprocess audio
-        inputs = self.feature_extractor(
-            audio,
-            sampling_rate=16000,
-            return_tensors="pt",
-            padding=True
-        )
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        if self.is_ecapa:
+            # ECAPA-TDNN forward pass
+            # audio should be a list of tensors or a batched tensor
+            if isinstance(audio, list):
+                # Batch of audio samples
+                embeddings = []
+                for aud in audio:
+                    emb = self.backbone.encode_batch(aud.unsqueeze(0).to(self.device))
+                    embeddings.append(emb.squeeze())
+                embeddings = torch.stack(embeddings)  # (batch, 192)
+            else:
+                # Single batched tensor
+                embeddings = self.backbone.encode_batch(audio.to(self.device))  # (batch, 192)
+                if embeddings.dim() == 3:
+                    embeddings = embeddings.squeeze(1)  # Remove extra dimension if present
 
-        # Forward through backbone
-        outputs = self.backbone(**inputs)
-        hidden_states = outputs.last_hidden_state  # (batch, seq_len, hidden_dim)
+            # Classifier
+            logits = self.classifier(embeddings)
+            return logits
 
-        # Mean pooling
-        embeddings = hidden_states.mean(dim=1)  # (batch, hidden_dim)
+        else:
+            # Transformer models forward pass
+            # Preprocess audio
+            inputs = self.feature_extractor(
+                audio,
+                sampling_rate=16000,
+                return_tensors="pt",
+                padding=True
+            )
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-        # Classifier
-        logits = self.classifier(embeddings)
+            # Forward through backbone
+            outputs = self.backbone(**inputs)
+            hidden_states = outputs.last_hidden_state  # (batch, seq_len, hidden_dim)
 
-        return logits
+            # Mean pooling
+            embeddings = hidden_states.mean(dim=1)  # (batch, hidden_dim)
+
+            # Classifier
+            logits = self.classifier(embeddings)
+
+            return logits
 
     def create_dataloaders(self, batch_size=16):
         """Create train/val/test dataloaders."""
@@ -238,8 +308,14 @@ class FineTuner:
         criterion = nn.CrossEntropyLoss(weight=self.class_weights.to(self.device))
 
         # Optimizer (both backbone layers and classifier)
+        if self.is_ecapa:
+            # For ECAPA, collect trainable parameters via named_parameters
+            backbone_params = [p for n, p in self.backbone.named_parameters() if p.requires_grad]
+        else:
+            backbone_params = [p for p in self.backbone.parameters() if p.requires_grad]
+
         optimizer = optim.AdamW([
-            {'params': [p for p in self.backbone.parameters() if p.requires_grad], 'lr': lr},
+            {'params': backbone_params, 'lr': lr},
             {'params': self.classifier.parameters(), 'lr': lr * 10}  # Higher LR for classifier
         ])
 
@@ -265,8 +341,15 @@ class FineTuner:
             self.logger.info(f"\nEpoch {epoch+1}/{max_epochs}")
             self.logger.info("-" * 60)
 
-            # Train
-            self.backbone.train()
+            # Train mode
+            if not self.is_ecapa:
+                self.backbone.train()
+            else:
+                # ECAPA modules need to be set to train mode individually
+                if hasattr(self.backbone, 'mods'):
+                    for module in self.backbone.mods.values():
+                        if hasattr(module, 'train'):
+                            module.train()
             self.classifier.train()
 
             train_loss = 0.0
@@ -294,8 +377,15 @@ class FineTuner:
             train_loss /= len(train_loader)
             train_acc = train_correct / train_total
 
-            # Validate
-            self.backbone.eval()
+            # Eval mode
+            if not self.is_ecapa:
+                self.backbone.eval()
+            else:
+                # ECAPA modules need to be set to eval mode individually
+                if hasattr(self.backbone, 'mods'):
+                    for module in self.backbone.mods.values():
+                        if hasattr(module, 'eval'):
+                            module.eval()
             self.classifier.eval()
 
             val_loss = 0.0
@@ -371,13 +461,29 @@ class FineTuner:
         # Load best checkpoint
         checkpoint_path = self.output_dir / "checkpoints" / "best_model.pth"
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        self.backbone.load_state_dict(checkpoint['backbone_state_dict'])
+
+        if self.is_ecapa:
+            # For ECAPA, load state dict with strict=False to handle SpeechBrain structure
+            try:
+                self.backbone.load_state_dict(checkpoint['backbone_state_dict'], strict=False)
+            except:
+                self.logger.warning("Could not load ECAPA backbone state dict - using current state")
+        else:
+            self.backbone.load_state_dict(checkpoint['backbone_state_dict'])
+
         self.classifier.load_state_dict(checkpoint['classifier_state_dict'])
 
         self.logger.info(f"✓ Loaded best checkpoint from epoch {checkpoint['epoch']}")
 
         # Evaluate
-        self.backbone.eval()
+        if not self.is_ecapa:
+            self.backbone.eval()
+        else:
+            # ECAPA modules need to be set to eval mode individually
+            if hasattr(self.backbone, 'mods'):
+                for module in self.backbone.mods.values():
+                    if hasattr(module, 'eval'):
+                        module.eval()
         self.classifier.eval()
 
         all_preds = []

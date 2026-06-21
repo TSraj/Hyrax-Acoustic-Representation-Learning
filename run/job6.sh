@@ -29,8 +29,9 @@ export https_proxy=http://proxy:80
 
 # -----------------------------------------------------------
 # Stage 6: Sampling Rate Experiment (ResNet-18 on mel spectrograms)
+# Tests: Picidae + Wetlands Bird (both datasets)
 # Needs:   outputs/phase2/manifests/  (from job1)
-# Outputs: outputs/phase2/sampling_rate/
+# Outputs: outputs/phase2/sampling_rate_experiment/{picidae,wetlands_bird}/
 # -----------------------------------------------------------
 
 echo "========================================"
@@ -38,7 +39,14 @@ echo "Stage 6: Sampling Rate Experiment"
 echo "Started: $(date)"
 echo "========================================"
 
-python3 scripts/phase2_06_sampling_rate_experiment.py
-echo ">>> Sampling rate experiment complete: $(date)"
+echo "Running sampling rate experiment on Picidae dataset..."
+python3 scripts/phase2_06_sampling_rate_experiment.py --dataset picidae
+echo ">>> Picidae experiment complete: $(date)"
 
+echo ""
+echo "Running sampling rate experiment on Wetlands Bird dataset..."
+python3 scripts/phase2_06_sampling_rate_experiment.py --dataset wetlands_bird
+echo ">>> Wetlands Bird experiment complete: $(date)"
+
+echo ""
 echo "Stage 6 complete: $(date)"
