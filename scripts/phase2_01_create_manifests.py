@@ -62,6 +62,9 @@ class ManifestCreator:
                 for ext in audio_extensions:
                     audio_files.extend(individual_dir.rglob(f"*{ext}"))
 
+                # Skip macOS resource-fork metadata files (._filename)
+                audio_files = [f for f in audio_files if not f.name.startswith('._')]
+
                 if audio_files:
                     individual_files[f"{dataset_key}_{individual_id}"] = [
                         str(f.relative_to(self.data_dir)) for f in audio_files
@@ -73,6 +76,9 @@ class ManifestCreator:
             audio_files = []
             for ext in audio_extensions:
                 audio_files.extend(dataset_path.rglob(f"*{ext}"))
+
+            # Skip macOS resource-fork metadata files (._filename)
+            audio_files = [f for f in audio_files if not f.name.startswith('._')]
 
             if audio_files:
                 individual_files[f"{dataset_key}_individual1"] = [
