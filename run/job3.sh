@@ -4,11 +4,11 @@ set -e
 #SBATCH --job-name=p2-pooled
 #SBATCH --output=logs/out_%j.out
 #SBATCH --error=logs/err_%j.err
-#SBATCH --time=24:00:00
-#SBATCH --partition=v100
+#SBATCH --time=4:00:00
+#SBATCH --partition=a100
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:v100:1
+#SBATCH --gres=gpu:a100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --export=NONE
 #SBATCH --mail-type=END,FAIL
