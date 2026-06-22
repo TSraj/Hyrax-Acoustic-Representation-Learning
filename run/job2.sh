@@ -1,14 +1,13 @@
 #!/bin/bash -l
-set -e
 
 #SBATCH --job-name=p2-zero-shot
 #SBATCH --output=logs/out_%j.out
 #SBATCH --error=logs/err_%j.err
 #SBATCH --time=6:00:00
-#SBATCH --partition=a100
+#SBATCH --partition=v100
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:a100:1
+#SBATCH --gres=gpu:v100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --export=NONE
 #SBATCH --mail-type=END,FAIL
@@ -19,6 +18,7 @@ set -e
 # -----------------------------------------------------------
 
 unset SLURM_EXPORT_ENV
+set -e
 cd "$SLURM_SUBMIT_DIR"
 
 module purge
