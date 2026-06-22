@@ -1,4 +1,5 @@
 #!/bin/bash -l
+set -e
 
 #SBATCH --job-name=p2-zero-shot
 #SBATCH --output=logs/out_%j.out

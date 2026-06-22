@@ -89,28 +89,28 @@ class ZeroShotEvaluator:
             # Pretrained-only, no ASR fine-tuning
             model_id = "facebook/wav2vec2-base"
             self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_id)
-            self.model = Wav2Vec2Model.from_pretrained(model_id)
+            self.model = Wav2Vec2Model.from_pretrained(model_id, use_safetensors=True)
             self.model_type = "transformer"
 
         elif self.model_name == "wav2vec2_base_960h":
             # ASR fine-tuned on 960h English
             model_id = "facebook/wav2vec2-base-960h"
             self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_id)
-            self.model = Wav2Vec2Model.from_pretrained(model_id)
+            self.model = Wav2Vec2Model.from_pretrained(model_id, use_safetensors=True)
             self.model_type = "transformer"
 
         elif self.model_name == "xls_r":
             # XLS-R 300M multilingual
             model_id = "facebook/wav2vec2-xls-r-300m"
             self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_id)
-            self.model = Wav2Vec2Model.from_pretrained(model_id)
+            self.model = Wav2Vec2Model.from_pretrained(model_id, use_safetensors=True)
             self.model_type = "transformer"
 
         elif self.model_name == "wavlm":
             # WavLM Base+ (uses same feature extractor as Wav2Vec2)
             model_id = "microsoft/wavlm-base-plus"
             self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_id)
-            self.model = WavLMModel.from_pretrained(model_id)
+            self.model = WavLMModel.from_pretrained(model_id, use_safetensors=True)
             self.model_type = "transformer"
 
         elif self.model_name == "ecapa_tdnn":

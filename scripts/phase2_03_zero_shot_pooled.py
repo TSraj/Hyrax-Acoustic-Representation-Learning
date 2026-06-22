@@ -90,25 +90,25 @@ class PooledZeroShotEvaluator:
         if self.model_name == "wav2vec2_base":
             model_id = "facebook/wav2vec2-base"
             self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_id)
-            self.model = Wav2Vec2Model.from_pretrained(model_id)
+            self.model = Wav2Vec2Model.from_pretrained(model_id, use_safetensors=True)
             self.model_type = "transformer"
 
         elif self.model_name == "wav2vec2_base_960h":
             model_id = "facebook/wav2vec2-base-960h"
             self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_id)
-            self.model = Wav2Vec2Model.from_pretrained(model_id)
+            self.model = Wav2Vec2Model.from_pretrained(model_id, use_safetensors=True)
             self.model_type = "transformer"
 
         elif self.model_name == "xls_r":
             model_id = "facebook/wav2vec2-xls-r-300m"
             self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_id)
-            self.model = Wav2Vec2Model.from_pretrained(model_id)
+            self.model = Wav2Vec2Model.from_pretrained(model_id, use_safetensors=True)
             self.model_type = "transformer"
 
         elif self.model_name == "wavlm":
             model_id = "microsoft/wavlm-base-plus"
             self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_id)
-            self.model = WavLMModel.from_pretrained(model_id)
+            self.model = WavLMModel.from_pretrained(model_id, use_safetensors=True)
             self.model_type = "transformer"
 
         elif self.model_name == "ecapa_tdnn":
