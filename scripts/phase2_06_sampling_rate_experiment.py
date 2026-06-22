@@ -9,6 +9,7 @@ import json
 import yaml
 import sys
 import torch
+torch.backends.cudnn.enabled = False  # V100 (CC 7.0) incompatible with bundled cuDNN
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
