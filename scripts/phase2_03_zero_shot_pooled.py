@@ -320,14 +320,22 @@ class PooledZeroShotEvaluator:
 
         if len(bird_embeddings) == 0:
             self.logger.warning("No bird samples found!")
-            return
+            return None
+
+        if len(bird_embeddings) < 2:
+            self.logger.warning(f"Insufficient bird samples for analysis ({len(bird_embeddings)} < 2). Skipping bird clustering.")
+            return None
 
         self.logger.info(f"Total bird samples: {len(bird_embeddings)}")
         self.logger.info(f"Bird datasets present: {set(bird_datasets_filtered)}")
 
         # t-SNE for birds only
         self.logger.info("\nRunning t-SNE on bird samples only...")
-        tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(bird_embeddings) - 1))
+        perplexity = min(30, max(1, len(bird_embeddings) - 1))
+        if perplexity < 5:
+            self.logger.warning(f"Very few bird samples ({len(bird_embeddings)}), t-SNE may not be meaningful.")
+
+        tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity)
         bird_2d = tsne.fit_transform(bird_embeddings)
 
         # Plot colored by dataset
