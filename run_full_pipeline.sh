@@ -15,14 +15,36 @@ echo "Models: ${MODELS[@]}"
 echo "Datasets: ${DATASETS[@]}"
 echo "Stage 2: $((${#MODELS[@]} * ${#DATASETS[@]})) jobs (5 models × 7 datasets)"
 echo "Stage 3: ${#MODELS[@]} jobs"
-echo "Total: 46 jobs (1 validation + 35 stage2 + 1 agg2 + 5 stage3 + 1 agg3 + 1 selection + 1 finetune + 1 report)"
+echo "Total: 47 jobs (1 manifest + 1 validation + 35 stage2 + 1 agg2 + 5 stage3 + 1 agg3 + 1 selection + 1 finetune + 1 report)"
 echo "Estimated completion: 24-30 hours"
 echo "=========================================="
 echo ""
 
-# Step 1: Validate manifests
-echo "[1/8] Submitting validation..."
-JOB1=$(sbatch --parsable << 'VALIDATE'
+# Step 1: Create manifests
+echo "[1/9] Submitting manifest creation..."
+JOB0=$(sbatch --parsable << 'MANIFEST'
+#!/bin/bash
+#SBATCH --job-name=00_manifest
+#SBATCH --partition=v100
+#SBATCH --gres=gpu:v100:1
+#SBATCH --cpus-per-task=2
+#SBATCH --time=00:30:00
+#SBATCH --output=logs/00_manifest_%j.out
+#SBATCH --error=logs/00_manifest_%j.err
+
+cd /home/hpc/iwi5/iwi5452h/project/Hyrax-Acoustic-Representation-Learning
+module load python/3.12-conda
+source venv/bin/activate
+
+python scripts/phase2_01_create_manifests.py
+MANIFEST
+)
+echo "  Manifest Creation: $JOB0"
+echo ""
+
+# Step 2: Validate manifests
+echo "[2/9] Submitting validation..."
+JOB1=$(sbatch --parsable --dependency=afterok:$JOB0 << 'VALIDATE'
 #!/bin/bash
 #SBATCH --job-name=01_validate
 #SBATCH --partition=v100
@@ -43,8 +65,8 @@ VALIDATE
 echo "  Validation: $JOB1"
 echo ""
 
-# Step 2: Stage 2 - All 35 model/dataset combinations
-echo "[2/8] Submitting Stage 2: Per-dataset zero-shot (35 jobs)..."
+# Step 3: Stage 2 - All 35 model/dataset combinations
+echo "[3/9] Submitting Stage 2: Per-dataset zero-shot (35 jobs)..."
 STAGE2_JOBS=()
 job_count=0
 
@@ -75,8 +97,8 @@ STAGE2JOB
 done
 echo ""
 
-# Step 3: Aggregate Stage 2
-echo "[3/8] Submitting Stage 2 aggregation..."
+# Step 4: Aggregate Stage 2
+echo "[4/9] Submitting Stage 2 aggregation..."
 STAGE2_DEPS=$(IFS=:; echo "${STAGE2_JOBS[*]}")
 JOB_AGG2=$(sbatch --parsable --dependency=afterok:$STAGE2_DEPS << 'AGGREGATE2'
 #!/bin/bash
@@ -98,8 +120,8 @@ AGGREGATE2
 echo "  Aggregate Stage 2: $JOB_AGG2"
 echo ""
 
-# Step 4: Stage 3 - All 5 pooled models
-echo "[4/8] Submitting Stage 3: Pooled zero-shot (5 jobs)..."
+# Step 5: Stage 3 - All 5 pooled models
+echo "[5/9] Submitting Stage 3: Pooled zero-shot (5 jobs)..."
 STAGE3_JOBS=()
 
 for i in "${!MODELS[@]}"; do
@@ -127,8 +149,8 @@ STAGE3JOB
 done
 echo ""
 
-# Step 5: Aggregate Stage 3
-echo "[5/8] Submitting Stage 3 aggregation..."
+# Step 6: Aggregate Stage 3
+echo "[6/9] Submitting Stage 3 aggregation..."
 STAGE3_DEPS=$(IFS=:; echo "${STAGE3_JOBS[*]}")
 JOB_AGG3=$(sbatch --parsable --dependency=afterok:$STAGE3_DEPS << 'AGGREGATE3'
 #!/bin/bash
@@ -150,8 +172,8 @@ AGGREGATE3
 echo "  Aggregate Stage 3: $JOB_AGG3"
 echo ""
 
-# Step 6: Model selection
-echo "[6/8] Submitting model selection..."
+# Step 7: Model selection
+echo "[7/9] Submitting model selection..."
 JOB_SELECT=$(sbatch --parsable --dependency=afterok:$JOB_AGG3 << 'SELECTION'
 #!/bin/bash
 #SBATCH --job-name=06_selection
@@ -172,8 +194,8 @@ SELECTION
 echo "  Model Selection: $JOB_SELECT"
 echo ""
 
-# Step 7: Fine-tuning
-echo "[7/8] Submitting fine-tuning..."
+# Step 8: Fine-tuning
+echo "[8/9] Submitting fine-tuning..."
 JOB_FINETUNE=$(sbatch --parsable --dependency=afterok:$JOB_SELECT << 'FINETUNE'
 #!/bin/bash
 #SBATCH --job-name=07_finetune
@@ -195,8 +217,8 @@ FINETUNE
 echo "  Fine-tuning: $JOB_FINETUNE"
 echo ""
 
-# Step 8: Final report
-echo "[8/8] Submitting final report..."
+# Step 9: Final report
+echo "[9/9] Submitting final report..."
 JOB_REPORT=$(sbatch --parsable --dependency=afterok:$JOB_FINETUNE << 'REPORT'
 #!/bin/bash
 #SBATCH --job-name=08_report
@@ -222,6 +244,7 @@ echo "PIPELINE SUBMITTED SUCCESSFULLY!"
 echo "=========================================="
 echo ""
 echo "Summary:"
+echo "  • Manifest creation: 1 job (30 min)"
 echo "  • Validation: 1 job (10 min)"
 echo "  • Stage 2 (per-dataset): 35 jobs (2.5h each, parallel)"
 echo "  • Stage 3 (pooled): 5 jobs (6h each, parallel)"
@@ -229,7 +252,7 @@ echo "  • Model selection: 1 job (10 min)"
 echo "  • Fine-tuning: 1 job (12h)"
 echo "  • Final report: 1 job (10 min)"
 echo ""
-echo "Total: 46 jobs"
+echo "Total: 47 jobs"
 echo "Est. wall-clock time: 24-30 hours"
 echo ""
 echo "Monitor: squeue -u \$USER"
