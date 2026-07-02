@@ -461,8 +461,8 @@ class PooledZeroShotEvaluator:
             lambda path: self.extract_embedding(path, layer_idx)
         )
 
-        # Use num_workers=0 on MPS (macOS), otherwise 4 for HPC
-        num_workers = 0 if self.device == 'mps' else 4
+        # Use num_workers=0 to avoid CUDA fork errors in multiprocessing
+        num_workers = 0
         pin_memory = self.device == 'cuda'
 
         train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=num_workers, pin_memory=pin_memory)

@@ -233,8 +233,8 @@ class ZeroShotEvaluator:
             lambda path: self.extract_embedding(path, layer_idx)
         )
 
-        # Use num_workers=0 on MPS (macOS) due to pickling issues, otherwise 4 for HPC
-        num_workers = 0 if self.device == 'mps' else 4
+        # Use num_workers=0 to avoid CUDA fork errors in multiprocessing
+        num_workers = 0
         pin_memory = self.device == 'cuda'  # Only pin memory on CUDA
 
         return DataLoader(
