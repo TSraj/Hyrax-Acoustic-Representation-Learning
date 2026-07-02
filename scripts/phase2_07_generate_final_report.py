@@ -114,7 +114,7 @@ class FinalReportGenerator:
         summary.append("KEY METRICS")
         summary.append("-" * 80)
 
-        if results['stage2']:
+        if results['stage2'] is not None:
             per_dataset_mean = results['stage2']['accuracy'].mean()
             summary.append(f"Per-Dataset Zero-Shot (mean):  {per_dataset_mean*100:.2f}%")
 
@@ -167,7 +167,7 @@ class FinalReportGenerator:
         summaries.append("-" * 80)
         summaries.append("STAGE 2: PER-DATASET ZERO-SHOT EVALUATION")
         summaries.append("-" * 80)
-        if results['stage2']:
+        if results['stage2'] is not None:
             num_models = results['stage2']['model'].nunique()
             num_datasets = results['stage2']['dataset'].nunique()
             summaries.append(f"Models evaluated: {num_models}")
@@ -194,8 +194,9 @@ class FinalReportGenerator:
             pooled_sorted = sorted(results['stage3'], key=lambda x: x['test_accuracy'], reverse=True)
             for i, r in enumerate(pooled_sorted, 1):
                 acc = r['test_accuracy'] * 100
-                bird_sil = r.get('bird_clustering_metric', {}).get('silhouette_by_dataset', 'N/A')
-                if bird_sil != 'N/A':
+                bird_metric = r.get('bird_clustering_metric')
+                if bird_metric and 'silhouette_by_dataset' in bird_metric:
+                    bird_sil = bird_metric['silhouette_by_dataset']
                     summaries.append(f"  {i}. {r['model']}: {acc:.2f}% (bird silhouette: {bird_sil:.3f})")
                 else:
                     summaries.append(f"  {i}. {r['model']}: {acc:.2f}%")
@@ -279,15 +280,13 @@ class FinalReportGenerator:
 
         return summaries
 
-    def create_comparison_figure(self, results):
-        """Create comprehensive comparison figure."""
-        if not all([results['stage2'], results['stage3'], results['stage4'], results['stage5']]):
-            self.logger.warning("Skipping comparison figure - missing required results")
+    def create_comparison_figures(self, results):
+        """Create individual comparison figures."""
+        if not all([results['stage2'] is not None, results['stage3'] is not None,
+                    results['stage4'] is not None, results['stage5'] is not None]):
+            self.logger.warning("Skipping comparison figures - missing required results")
             return
 
-        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-
-        # 1. Model comparison across stages
         best_model = results['stage4']['best_model']
 
         # Per-dataset mean
@@ -300,85 +299,111 @@ class FinalReportGenerator:
         # Fine-tuned
         fine_tuned = results['stage5']['test_accuracy']
 
+        # Figure 1: Best Model Performance Across Stages
+        fig, ax = plt.subplots(figsize=(10, 6))
         stages = ['Per-Dataset\nZero-Shot', 'Pooled\nZero-Shot', 'Pooled\nFine-Tuned']
         accuracies = [per_dataset_mean * 100, pooled_zero_shot * 100, fine_tuned * 100]
 
-        axes[0, 0].bar(stages, accuracies, color=['skyblue', 'orange', 'green'], edgecolor='black', linewidth=2)
-        axes[0, 0].set_ylabel('Accuracy (%)', fontweight='bold')
-        axes[0, 0].set_title(f'Best Model Performance Across Stages\n({best_model})', fontweight='bold')
-        axes[0, 0].set_ylim(0, 100)
-        axes[0, 0].grid(axis='y', alpha=0.3)
+        ax.bar(stages, accuracies, color=['skyblue', 'orange', 'green'], edgecolor='black', linewidth=2)
+        ax.set_ylabel('Accuracy (%)', fontweight='bold', fontsize=12)
+        ax.set_title(f'Best Model Performance Across Stages\n({best_model})', fontweight='bold', fontsize=14)
+        ax.set_ylim(0, 100)
+        ax.grid(axis='y', alpha=0.3)
 
         for i, acc in enumerate(accuracies):
-            axes[0, 0].text(i, acc + 2, f'{acc:.2f}%', ha='center', fontweight='bold')
+            ax.text(i, acc + 2, f'{acc:.2f}%', ha='center', fontweight='bold', fontsize=11)
 
-        # 2. All models ranking (Stage 2)
+        plt.tight_layout()
+        plt.savefig(self.output_dir / "1_best_model_performance_stages.png", dpi=300, bbox_inches='tight')
+        plt.close()
+        self.logger.info(f"  ✓ Figure 1: Best model performance across stages")
+
+        # Figure 2: All Models Ranking
+        fig, ax = plt.subplots(figsize=(10, 6))
         model_means = results['stage2'].groupby('model')['accuracy'].mean().sort_values(ascending=False)
-        axes[0, 1].barh(range(len(model_means)), model_means.values * 100,
-                       color=['green' if m == best_model else 'skyblue' for m in model_means.index],
-                       edgecolor='black', linewidth=1.5)
-        axes[0, 1].set_yticks(range(len(model_means)))
-        axes[0, 1].set_yticklabels(model_means.index)
-        axes[0, 1].set_xlabel('Mean Accuracy (%)', fontweight='bold')
-        axes[0, 1].set_title('All Models Ranking (Per-Dataset Mean)', fontweight='bold')
-        axes[0, 1].grid(axis='x', alpha=0.3)
-        axes[0, 1].invert_yaxis()
+        ax.barh(range(len(model_means)), model_means.values * 100,
+                color=['green' if m == best_model else 'skyblue' for m in model_means.index],
+                edgecolor='black', linewidth=1.5)
+        ax.set_yticks(range(len(model_means)))
+        ax.set_yticklabels(model_means.index, fontsize=11)
+        ax.set_xlabel('Mean Accuracy (%)', fontweight='bold', fontsize=12)
+        ax.set_title('All Models Ranking (Per-Dataset Mean)', fontweight='bold', fontsize=14)
+        ax.grid(axis='x', alpha=0.3)
+        ax.invert_yaxis()
 
-        # 3. Bird clustering analysis
+        plt.tight_layout()
+        plt.savefig(self.output_dir / "2_all_models_ranking.png", dpi=300, bbox_inches='tight')
+        plt.close()
+        self.logger.info(f"  ✓ Figure 2: All models ranking")
+
+        # Figure 3: Bird Clustering Analysis
         if results['stage3']:
             models = []
             silhouettes = []
             for r in results['stage3']:
-                if r.get('bird_clustering_metric') and 'silhouette_by_dataset' in r['bird_clustering_metric']:
+                bird_metric = r.get('bird_clustering_metric')
+                if bird_metric and 'silhouette_by_dataset' in bird_metric:
                     models.append(r['model'])
-                    silhouettes.append(r['bird_clustering_metric']['silhouette_by_dataset'])
+                    silhouettes.append(bird_metric['silhouette_by_dataset'])
 
             if models:
+                fig, ax = plt.subplots(figsize=(10, 6))
                 colors = ['red' if s > 0.3 else 'orange' if s > 0.2 else 'green' for s in silhouettes]
-                axes[1, 0].bar(range(len(models)), silhouettes, color=colors, edgecolor='black', linewidth=1.5)
-                axes[1, 0].set_xticks(range(len(models)))
-                axes[1, 0].set_xticklabels(models, rotation=45, ha='right')
-                axes[1, 0].set_ylabel('Silhouette Score', fontweight='bold')
-                axes[1, 0].set_title('Bird Clustering Quality\n(Lower = Better)', fontweight='bold')
-                axes[1, 0].axhline(y=0.3, color='red', linestyle='--', alpha=0.5)
-                axes[1, 0].axhline(y=0.2, color='orange', linestyle='--', alpha=0.5)
-                axes[1, 0].grid(axis='y', alpha=0.3)
+                ax.bar(range(len(models)), silhouettes, color=colors, edgecolor='black', linewidth=1.5)
+                ax.set_xticks(range(len(models)))
+                ax.set_xticklabels(models, rotation=45, ha='right', fontsize=11)
+                ax.set_ylabel('Silhouette Score', fontweight='bold', fontsize=12)
+                ax.set_title('Bird Clustering Quality\n(Lower = Better)', fontweight='bold', fontsize=14)
+                ax.axhline(y=0.3, color='red', linestyle='--', alpha=0.5, label='Poor (>0.3)')
+                ax.axhline(y=0.2, color='orange', linestyle='--', alpha=0.5, label='Moderate (0.2-0.3)')
+                ax.legend()
+                ax.grid(axis='y', alpha=0.3)
 
-        # 4. Summary statistics table
-        axes[1, 1].axis('off')
+                plt.tight_layout()
+                plt.savefig(self.output_dir / "3_bird_clustering_quality.png", dpi=300, bbox_inches='tight')
+                plt.close()
+                self.logger.info(f"  ✓ Figure 3: Bird clustering quality")
+
+        # Figure 4: Summary Statistics Table
+        fig, ax = plt.subplots(figsize=(10, 8))
+        ax.axis('off')
 
         table_data = [
             ['Metric', 'Value'],
             ['Best Model', best_model],
             ['Datasets', str(results['stage2']['dataset'].nunique())],
             ['Total Individuals', str(results['stage5']['num_classes'])],
-            ['Per-Dataset Acc', f"{per_dataset_mean*100:.2f}%"],
+            ['Per-Dataset Accuracy', f"{per_dataset_mean*100:.2f}%"],
             ['Pooled Zero-Shot', f"{pooled_zero_shot*100:.2f}%"],
             ['Pooled Fine-Tuned', f"{fine_tuned*100:.2f}%"],
-            ['Improvement', f"+{(fine_tuned - pooled_zero_shot)*100:.2f}%"],
+            ['Fine-Tuning Improvement', f"+{(fine_tuned - pooled_zero_shot)*100:.2f}%"],
         ]
 
         if results['stage6']:
-            table_data.append(['SR Experiment', results['stage6']['dataset']])
-            table_data.append(['Info Loss', f"{results['stage6']['comparison']['percent_information_loss']:.2f}%"])
+            table_data.append(['SR Experiment Dataset', results['stage6']['dataset']])
+            table_data.append(['Information Loss', f"{results['stage6']['comparison']['percent_information_loss']:.2f}%"])
 
-        table = axes[1, 1].table(cellText=table_data, cellLoc='left', loc='center',
-                                colWidths=[0.4, 0.6])
+        table = ax.table(cellText=table_data, cellLoc='left', loc='center',
+                        colWidths=[0.5, 0.5])
         table.auto_set_font_size(False)
-        table.set_fontsize(11)
-        table.scale(1, 2.5)
+        table.set_fontsize(13)
+        table.scale(1, 3)
 
         # Style header
         for i in range(2):
             table[(0, i)].set_facecolor('#4CAF50')
-            table[(0, i)].set_text_props(weight='bold', color='white')
+            table[(0, i)].set_text_props(weight='bold', color='white', fontsize=14)
 
-        plt.suptitle('Phase 2: Comprehensive Results Summary', fontsize=16, fontweight='bold', y=0.98)
+        # Highlight best model row
+        table[(1, 0)].set_facecolor('#E8F5E9')
+        table[(1, 1)].set_facecolor('#E8F5E9')
+        table[(1, 1)].set_text_props(weight='bold')
+
+        ax.set_title('Phase 2: Summary Statistics', fontsize=16, fontweight='bold', pad=20)
         plt.tight_layout()
-        plt.savefig(self.output_dir / "comprehensive_results_summary.png", dpi=300, bbox_inches='tight')
+        plt.savefig(self.output_dir / "4_summary_statistics.png", dpi=300, bbox_inches='tight')
         plt.close()
-
-        self.logger.info(f"✓ Comparison figure saved")
+        self.logger.info(f"  ✓ Figure 4: Summary statistics table")
 
     def generate_text_report(self, results):
         """Generate comprehensive text report."""
@@ -454,6 +479,94 @@ class FinalReportGenerator:
         # Also print to console
         print("\n" + '\n'.join(report))
 
+    def generate_csv_reports(self, results):
+        """Generate CSV reports for easy analysis."""
+        self.logger.info("\nGenerating CSV reports...")
+
+        # CSV 1: Executive Summary
+        if results['stage4'] and results['stage5']:
+            best_model = results['stage4']['best_model']
+            per_dataset_mean = results['stage2'][results['stage2']['model'] == best_model]['accuracy'].mean() if results['stage2'] is not None else None
+            pooled_result = next((r for r in results['stage3'] if r['model'] == best_model), None) if results['stage3'] else None
+            pooled_zero_shot = pooled_result['test_accuracy'] if pooled_result else None
+            fine_tuned = results['stage5']['test_accuracy']
+
+            summary_data = {
+                'Metric': ['Best Model', 'Per-Dataset Zero-Shot Mean', 'Pooled Zero-Shot', 'Pooled Fine-Tuned', 'Fine-Tuning Improvement'],
+                'Value': [
+                    best_model,
+                    f"{per_dataset_mean*100:.2f}%" if per_dataset_mean else "N/A",
+                    f"{pooled_zero_shot*100:.2f}%" if pooled_zero_shot else "N/A",
+                    f"{fine_tuned*100:.2f}%",
+                    f"+{(fine_tuned - pooled_zero_shot)*100:.2f}%" if pooled_zero_shot else "N/A"
+                ]
+            }
+            summary_df = pd.DataFrame(summary_data)
+            summary_df.to_csv(self.output_dir / "executive_summary.csv", index=False)
+            self.logger.info(f"  ✓ executive_summary.csv")
+
+        # CSV 2: All Models Comparison (Stage 2)
+        if results['stage2'] is not None:
+            model_comparison = results['stage2'].groupby('model').agg({
+                'accuracy': ['mean', 'std', 'min', 'max']
+            }).round(4)
+            model_comparison.columns = ['Mean_Accuracy', 'Std_Accuracy', 'Min_Accuracy', 'Max_Accuracy']
+            model_comparison = model_comparison.sort_values('Mean_Accuracy', ascending=False)
+            model_comparison.to_csv(self.output_dir / "all_models_comparison.csv")
+            self.logger.info(f"  ✓ all_models_comparison.csv")
+
+        # CSV 3: Per-Dataset Results (Stage 2)
+        if results['stage2'] is not None:
+            results['stage2'].to_csv(self.output_dir / "per_dataset_results.csv", index=False)
+            self.logger.info(f"  ✓ per_dataset_results.csv")
+
+        # CSV 4: Pooled Results (Stage 3)
+        if results['stage3']:
+            pooled_data = []
+            for r in results['stage3']:
+                bird_metric = r.get('bird_clustering_metric')
+                pooled_data.append({
+                    'Model': r['model'],
+                    'Test_Accuracy': r['test_accuracy'],
+                    'Val_Accuracy': r.get('val_accuracy', 'N/A'),
+                    'Bird_Silhouette': bird_metric['silhouette_by_dataset'] if bird_metric and 'silhouette_by_dataset' in bird_metric else 'N/A'
+                })
+            pooled_df = pd.DataFrame(pooled_data)
+            pooled_df = pooled_df.sort_values('Test_Accuracy', ascending=False)
+            pooled_df.to_csv(self.output_dir / "pooled_results.csv", index=False)
+            self.logger.info(f"  ✓ pooled_results.csv")
+
+        # CSV 5: Model Selection Details (Stage 4)
+        if results['stage4']:
+            selection_data = {
+                'Rank': list(range(1, len(results['stage4']['ranking']) + 1)),
+                'Model': results['stage4']['ranking'],
+                'Selected': [m == results['stage4']['best_model'] for m in results['stage4']['ranking']]
+            }
+            selection_df = pd.DataFrame(selection_data)
+            selection_df.to_csv(self.output_dir / "model_selection_ranking.csv", index=False)
+            self.logger.info(f"  ✓ model_selection_ranking.csv")
+
+        # CSV 6: Fine-Tuning Results (Stage 5)
+        if results['stage5']:
+            finetuning_data = {
+                'Metric': ['Model', 'Fine-Tuned Layers', 'Num Classes', 'Training Epochs', 'Batch Size', 'Learning Rate',
+                          'Best Val Accuracy', 'Test Accuracy'],
+                'Value': [
+                    results['stage5']['model'],
+                    results['stage5']['fine_tuned_layers'],
+                    results['stage5']['num_classes'],
+                    results['stage5']['training_epochs'],
+                    results['stage5']['batch_size'],
+                    results['stage5']['learning_rate'],
+                    f"{results['stage5']['best_val_accuracy']*100:.2f}%",
+                    f"{results['stage5']['test_accuracy']*100:.2f}%"
+                ]
+            }
+            finetuning_df = pd.DataFrame(finetuning_data)
+            finetuning_df.to_csv(self.output_dir / "fine_tuning_results.csv", index=False)
+            self.logger.info(f"  ✓ fine_tuning_results.csv")
+
     def generate(self):
         """Generate complete final report."""
         self.logger.info("\n" + "="*80)
@@ -467,15 +580,30 @@ class FinalReportGenerator:
         report = self.generate_text_report(results)
         self.save_report(report)
 
-        # Generate comparison figure
-        self.create_comparison_figure(results)
+        # Generate individual figures
+        self.create_comparison_figures(results)
+
+        # Generate CSV reports
+        self.generate_csv_reports(results)
 
         self.logger.info("\n" + "="*80)
         self.logger.info("FINAL REPORT GENERATION COMPLETE")
         self.logger.info("="*80)
         self.logger.info(f"\nOutputs saved to: {self.output_dir}")
-        self.logger.info(f"  • phase2_final_report.txt")
-        self.logger.info(f"  • comprehensive_results_summary.png")
+        self.logger.info(f"  Text Report:")
+        self.logger.info(f"    • phase2_final_report.txt")
+        self.logger.info(f"  Figures:")
+        self.logger.info(f"    • 1_best_model_performance_stages.png")
+        self.logger.info(f"    • 2_all_models_ranking.png")
+        self.logger.info(f"    • 3_bird_clustering_quality.png")
+        self.logger.info(f"    • 4_summary_statistics.png")
+        self.logger.info(f"  CSV Reports:")
+        self.logger.info(f"    • executive_summary.csv")
+        self.logger.info(f"    • all_models_comparison.csv")
+        self.logger.info(f"    • per_dataset_results.csv")
+        self.logger.info(f"    • pooled_results.csv")
+        self.logger.info(f"    • model_selection_ranking.csv")
+        self.logger.info(f"    • fine_tuning_results.csv")
 
 
 def main():

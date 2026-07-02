@@ -53,7 +53,34 @@ class AudioDataset(Dataset):
         if len(audio) > max_samples:
             audio = audio[:max_samples]
 
+        # Pad very short files (minimum 0.5 seconds)
+        min_samples = int(0.5 * 16000)
+        if len(audio) < min_samples:
+            audio = np.pad(audio, (0, min_samples - len(audio)), mode='constant')
+
         return torch.FloatTensor(audio), label
+
+
+def collate_fn(batch):
+    """Custom collate function to pad variable-length audio to same length."""
+    audios, labels = zip(*batch)
+
+    # Find max length in batch
+    max_len = max(audio.shape[0] for audio in audios)
+
+    # Pad all audios to max length
+    padded_audios = []
+    for audio in audios:
+        if audio.shape[0] < max_len:
+            padding = torch.zeros(max_len - audio.shape[0])
+            audio = torch.cat([audio, padding])
+        padded_audios.append(audio)
+
+    # Stack into batch
+    audio_batch = torch.stack(padded_audios)
+    label_batch = torch.LongTensor(labels)
+
+    return audio_batch, label_batch
 
 
 class FineTuner:
@@ -280,9 +307,16 @@ class FineTuner:
             max_duration=30
         )
 
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
-        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+        # Debug mode: use small subset
+        if hasattr(self, 'debug_mode') and self.debug_mode:
+            self.logger.info("  🐛 DEBUG MODE: Using small subset")
+            train_dataset.items = train_dataset.items[:50]
+            val_dataset.items = val_dataset.items[:20]
+            test_dataset.items = test_dataset.items[:20]
+
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, collate_fn=collate_fn)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0, collate_fn=collate_fn)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0, collate_fn=collate_fn)
 
         self.logger.info(f"  Train: {len(train_dataset)} samples, {len(train_loader)} batches")
         self.logger.info(f"  Val:   {len(val_dataset)} samples, {len(val_loader)} batches")
@@ -322,7 +356,7 @@ class FineTuner:
 
         # Learning rate scheduler
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='max', factor=0.5, patience=5, verbose=True
+            optimizer, mode='max', factor=0.5, patience=5
         )
 
         # Training state
@@ -500,14 +534,20 @@ class FineTuner:
 
         # Calculate metrics
         test_acc = accuracy_score(all_labels, all_preds)
+
+        # Get only classes present in test set (important for debug mode with small samples)
+        unique_labels = sorted(set(all_labels))
+        present_class_names = [self.manifest['individuals'][i] for i in unique_labels]
+
         report = classification_report(
             all_labels,
             all_preds,
-            target_names=self.manifest['individuals'],
+            labels=unique_labels,
+            target_names=present_class_names,
             output_dict=True,
             zero_division=0
         )
-        cm = confusion_matrix(all_labels, all_preds)
+        cm = confusion_matrix(all_labels, all_preds, labels=unique_labels)
 
         self.logger.info(f"\nTest Accuracy: {test_acc:.4f}")
 
@@ -521,62 +561,93 @@ class FineTuner:
 
         return results
 
-    def plot_training_curves(self, history, save_path):
-        """Plot training curves."""
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-
+    def plot_training_curves(self, history, save_dir):
+        """Plot training curves as separate individual figures."""
         epochs = range(1, len(history['train_loss']) + 1)
-
-        # Loss
-        axes[0, 0].plot(epochs, history['train_loss'], 'b-', label='Train Loss', linewidth=2)
-        axes[0, 0].plot(epochs, history['val_loss'], 'r-', label='Val Loss', linewidth=2)
-        axes[0, 0].set_xlabel('Epoch', fontweight='bold')
-        axes[0, 0].set_ylabel('Loss', fontweight='bold')
-        axes[0, 0].set_title('Training and Validation Loss', fontweight='bold')
-        axes[0, 0].legend()
-        axes[0, 0].grid(alpha=0.3)
-
-        # Accuracy
-        axes[0, 1].plot(epochs, history['train_acc'], 'b-', label='Train Acc', linewidth=2)
-        axes[0, 1].plot(epochs, history['val_acc'], 'r-', label='Val Acc', linewidth=2)
-        axes[0, 1].set_xlabel('Epoch', fontweight='bold')
-        axes[0, 1].set_ylabel('Accuracy', fontweight='bold')
-        axes[0, 1].set_title('Training and Validation Accuracy', fontweight='bold')
-        axes[0, 1].legend()
-        axes[0, 1].grid(alpha=0.3)
-
-        # Learning rate
-        axes[1, 0].plot(epochs, history['lr'], 'g-', linewidth=2)
-        axes[1, 0].set_xlabel('Epoch', fontweight='bold')
-        axes[1, 0].set_ylabel('Learning Rate', fontweight='bold')
-        axes[1, 0].set_title('Learning Rate Schedule', fontweight='bold')
-        axes[1, 0].set_yscale('log')
-        axes[1, 0].grid(alpha=0.3)
-
-        # Best model marker
         best_val_acc = max(history['val_acc'])
         best_epoch = history['val_acc'].index(best_val_acc) + 1
-        axes[0, 1].axvline(x=best_epoch, color='green', linestyle='--', alpha=0.7, linewidth=2)
-        axes[0, 1].plot(best_epoch, best_val_acc, 'g*', markersize=20, label='Best Model')
-        axes[0, 1].legend()
 
-        # Summary text
-        axes[1, 1].axis('off')
-        summary_text = f"Model: {self.model_name}\n"
-        summary_text += f"Fine-tuned: First 4 layers\n"
-        summary_text += f"Num Classes: {self.num_classes}\n"
-        summary_text += f"Total Epochs: {len(epochs)}\n"
-        summary_text += f"Best Epoch: {best_epoch}\n"
-        summary_text += f"Best Val Acc: {best_val_acc:.4f}\n"
-
-        axes[1, 1].text(0.1, 0.5, summary_text, fontsize=14, verticalalignment='center',
-                       bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-
+        # Figure 1: Loss curves
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(epochs, history['train_loss'], 'b-', label='Train Loss', linewidth=2)
+        ax.plot(epochs, history['val_loss'], 'r-', label='Val Loss', linewidth=2)
+        ax.set_xlabel('Epoch', fontweight='bold', fontsize=12)
+        ax.set_ylabel('Loss', fontweight='bold', fontsize=12)
+        ax.set_title('Training and Validation Loss', fontweight='bold', fontsize=14)
+        ax.legend(fontsize=11)
+        ax.grid(alpha=0.3)
         plt.tight_layout()
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.savefig(save_dir / "1_loss_curves.png", dpi=300, bbox_inches='tight')
         plt.close()
+        self.logger.info(f"  ✓ Loss curves saved")
 
-        self.logger.info(f"✓ Training curves saved: {save_path}")
+        # Figure 2: Accuracy curves
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(epochs, history['train_acc'], 'b-', label='Train Acc', linewidth=2)
+        ax.plot(epochs, history['val_acc'], 'r-', label='Val Acc', linewidth=2)
+        ax.axvline(x=best_epoch, color='green', linestyle='--', alpha=0.7, linewidth=2, label=f'Best Epoch ({best_epoch})')
+        ax.plot(best_epoch, best_val_acc, 'g*', markersize=20, label=f'Best Val Acc: {best_val_acc:.4f}')
+        ax.set_xlabel('Epoch', fontweight='bold', fontsize=12)
+        ax.set_ylabel('Accuracy', fontweight='bold', fontsize=12)
+        ax.set_title('Training and Validation Accuracy', fontweight='bold', fontsize=14)
+        ax.legend(fontsize=11)
+        ax.grid(alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(save_dir / "2_accuracy_curves.png", dpi=300, bbox_inches='tight')
+        plt.close()
+        self.logger.info(f"  ✓ Accuracy curves saved")
+
+        # Figure 3: Learning rate schedule
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(epochs, history['lr'], 'g-', linewidth=2)
+        ax.set_xlabel('Epoch', fontweight='bold', fontsize=12)
+        ax.set_ylabel('Learning Rate', fontweight='bold', fontsize=12)
+        ax.set_title('Learning Rate Schedule', fontweight='bold', fontsize=14)
+        ax.set_yscale('log')
+        ax.grid(alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(save_dir / "3_learning_rate_schedule.png", dpi=300, bbox_inches='tight')
+        plt.close()
+        self.logger.info(f"  ✓ Learning rate schedule saved")
+
+        # Figure 4: Training summary table
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.axis('off')
+
+        table_data = [
+            ['Metric', 'Value'],
+            ['Model', self.model_name],
+            ['Fine-tuned Layers', 'First 4 layers'],
+            ['Num Classes', str(self.num_classes)],
+            ['Total Epochs', str(len(epochs))],
+            ['Best Epoch', str(best_epoch)],
+            ['Best Val Accuracy', f'{best_val_acc:.4f}'],
+            ['Final Train Loss', f'{history["train_loss"][-1]:.4f}'],
+            ['Final Val Loss', f'{history["val_loss"][-1]:.4f}'],
+        ]
+
+        table = ax.table(cellText=table_data, cellLoc='left', loc='center',
+                        colWidths=[0.5, 0.5])
+        table.auto_set_font_size(False)
+        table.set_fontsize(13)
+        table.scale(1, 3)
+
+        # Style header
+        for i in range(2):
+            table[(0, i)].set_facecolor('#4CAF50')
+            table[(0, i)].set_text_props(weight='bold', color='white', fontsize=14)
+
+        # Highlight best epoch row
+        table[(5, 0)].set_facecolor('#E8F5E9')
+        table[(5, 1)].set_facecolor('#E8F5E9')
+        table[(6, 0)].set_facecolor('#E8F5E9')
+        table[(6, 1)].set_facecolor('#E8F5E9')
+
+        ax.set_title('Training Summary', fontsize=16, fontweight='bold', pad=20)
+        plt.tight_layout()
+        plt.savefig(save_dir / "4_training_summary.png", dpi=300, bbox_inches='tight')
+        plt.close()
+        self.logger.info(f"  ✓ Training summary saved")
 
     def plot_confusion_matrix(self, cm, save_path):
         """Plot confusion matrix."""
@@ -605,11 +676,21 @@ class FineTuner:
 
         self.logger.info(f"✓ Confusion matrix saved: {save_path}")
 
-    def run(self, batch_size=16, max_epochs=50, patience=10, lr=1e-4):
+    def run(self, batch_size=16, max_epochs=50, patience=10, lr=1e-4, debug=False):
         """Run complete fine-tuning pipeline."""
-        self.logger.info("\n" + "="*80)
-        self.logger.info("PHASE 2 - STAGE 5: FINE-TUNING")
-        self.logger.info("="*80)
+        self.debug_mode = debug
+
+        if debug:
+            self.logger.info("\n" + "="*80)
+            self.logger.info("🐛 DEBUG MODE: PHASE 2 - STAGE 5: FINE-TUNING")
+            self.logger.info("="*80)
+            max_epochs = 3
+            patience = 2
+            self.logger.info(f"  Using reduced epochs: {max_epochs}, patience: {patience}")
+        else:
+            self.logger.info("\n" + "="*80)
+            self.logger.info("PHASE 2 - STAGE 5: FINE-TUNING")
+            self.logger.info("="*80)
 
         # Create dataloaders
         train_loader, val_loader, test_loader = self.create_dataloaders(batch_size)
@@ -643,8 +724,10 @@ class FineTuner:
             test_results_json = {k: v for k, v in test_results.items() if k not in ['predictions', 'labels']}
             json.dump(test_results_json, f, indent=2)
 
-        # Plot training curves
-        self.plot_training_curves(history, self.output_dir / "training_curves" / "training_curves.png")
+        # Plot training curves (now saves multiple individual figures)
+        curves_dir = self.output_dir / "training_curves"
+        curves_dir.mkdir(exist_ok=True)
+        self.plot_training_curves(history, curves_dir)
 
         # Plot confusion matrix
         self.plot_confusion_matrix(np.array(test_results['confusion_matrix']),
@@ -670,6 +753,7 @@ def main():
     parser.add_argument("--max-epochs", type=int, default=50, help="Max epochs (default: 50)")
     parser.add_argument("--patience", type=int, default=10, help="Early stopping patience (default: 10)")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate (default: 1e-4)")
+    parser.add_argument("--debug", action="store_true", help="Debug mode: use small subset and 3 epochs")
     args = parser.parse_args()
 
     # Load configuration
@@ -725,7 +809,8 @@ def main():
         batch_size=args.batch_size,
         max_epochs=args.max_epochs,
         patience=args.patience,
-        lr=args.lr
+        lr=args.lr,
+        debug=args.debug
     )
 
     logger.info("\n✓ Fine-tuning complete - Ready for Hyrax evaluation")

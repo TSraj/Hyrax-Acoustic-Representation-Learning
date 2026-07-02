@@ -154,6 +154,11 @@ class ZeroShotEvaluator:
         if len(audio) > max_samples:
             audio = audio[:max_samples]
 
+        # Pad very short files (ECAPA needs minimum length)
+        min_samples = int(0.5 * 16000)  # Minimum 0.5 seconds
+        if len(audio) < min_samples:
+            audio = np.pad(audio, (0, min_samples - len(audio)), mode='constant')
+
         if self.model_type == "ecapa":
             # ECAPA-TDNN: single pooled embedding
             with torch.no_grad():
@@ -228,12 +233,16 @@ class ZeroShotEvaluator:
             lambda path: self.extract_embedding(path, layer_idx)
         )
 
+        # Use num_workers=0 on MPS (macOS) due to pickling issues, otherwise 4 for HPC
+        num_workers = 0 if self.device == 'mps' else 4
+        pin_memory = self.device == 'cuda'  # Only pin memory on CUDA
+
         return DataLoader(
             dataset,
             batch_size=batch_size,
             shuffle=(split == 'train'),
-            num_workers=4,  # HPC optimization: parallel data loading
-            pin_memory=True  # Faster GPU transfer
+            num_workers=num_workers,
+            pin_memory=pin_memory
         )
 
     def train_fc_head(self, train_loader, val_loader, embedding_dim, max_epochs=100, patience=10):
@@ -250,6 +259,11 @@ class ZeroShotEvaluator:
         Returns:
             Trained model, training history
         """
+        # Debug mode: reduce epochs
+        if hasattr(self, 'debug_mode') and self.debug_mode:
+            max_epochs = 3
+            patience = 2
+            self.logger.info(f"  - Debug mode: max_epochs={max_epochs}, patience={patience}")
         # Define FC head
         fc_head = nn.Linear(embedding_dim, self.num_classes).to(self.device)
 
@@ -335,10 +349,14 @@ class ZeroShotEvaluator:
                 self.logger.info(f"Early stopping triggered at epoch {epoch+1}")
                 break
 
-        # Restore best model
-        fc_head.load_state_dict(best_model_state)
-
-        self.logger.info(f"✓ Training complete. Best val acc: {best_val_acc:.4f}")
+        # Restore best model (if any improvement happened)
+        if best_model_state is not None:
+            fc_head.load_state_dict(best_model_state)
+            self.logger.info(f"✓ Training complete. Best val acc: {best_val_acc:.4f}")
+        else:
+            # No improvement at all - use final model state
+            self.logger.warning(f"⚠️  No validation improvement during training. Using final epoch model.")
+            best_val_acc = val_acc  # Use last epoch's validation accuracy
 
         return fc_head, history
 
@@ -368,14 +386,20 @@ class ZeroShotEvaluator:
 
         # Calculate metrics
         accuracy = accuracy_score(all_labels, all_preds)
+
+        # Get unique labels present in test set (important for debug mode with small samples)
+        unique_labels = sorted(set(all_labels))
+        present_class_names = [self.manifest['individuals'][i] for i in unique_labels]
+
         report = classification_report(
             all_labels,
             all_preds,
-            target_names=self.manifest['individuals'],
+            labels=unique_labels,
+            target_names=present_class_names,
             output_dict=True,
             zero_division=0
         )
-        cm = confusion_matrix(all_labels, all_preds)
+        cm = confusion_matrix(all_labels, all_preds, labels=unique_labels)
 
         results = {
             'accuracy': accuracy,
@@ -492,10 +516,17 @@ class ZeroShotEvaluator:
         else:
             # Transformer: evaluate all layers
             num_layers = len(self.model.encoder.layers)
-            self.logger.info(f"Transformer model: Evaluating {num_layers} layers")
+
+            # Debug mode: only test first and last layer
+            if hasattr(self, 'debug_mode') and self.debug_mode:
+                layers_to_test = [0, num_layers - 1]
+                self.logger.info(f"Transformer model (DEBUG): Evaluating 2 layers: {layers_to_test}")
+            else:
+                layers_to_test = range(num_layers)
+                self.logger.info(f"Transformer model: Evaluating {num_layers} layers")
 
             layer_results = []
-            for layer_idx in range(num_layers):
+            for layer_idx in layers_to_test:
                 results = self.evaluate_layer(layer_idx)
                 layer_results.append(results)
 
@@ -547,6 +578,7 @@ def main():
     parser.add_argument("--model", required=True, choices=["wav2vec2_base", "wav2vec2_base_960h", "xls_r", "wavlm", "ecapa_tdnn"])
     parser.add_argument("--dataset", required=True, help="Dataset key (e.g., macaque, anuraset)")
     parser.add_argument("--batch-size", type=int, default=64, help="Batch size (default: 64 for HPC)")
+    parser.add_argument("--debug", action="store_true", help="Debug mode: use small subset and test only 2 layers")
     args = parser.parse_args()
 
     # Load configuration
@@ -563,6 +595,8 @@ def main():
     logger.info(f"Model: {args.model}")
     logger.info(f"Dataset: {args.dataset}")
     logger.info(f"Batch size: {args.batch_size}")
+    if args.debug:
+        logger.info("⚠️  DEBUG MODE ENABLED: Using small subset + 2 layers only")
 
     # Get manifest path
     manifest_path = Path(config['paths']['output_dir']) / "phase2" / "manifests" / f"{args.dataset}_manifest.json"
@@ -578,6 +612,21 @@ def main():
 
     # Run evaluation
     evaluator = ZeroShotEvaluator(config, args.model, manifest_path, output_dir, logger)
+
+    # Apply debug mode modifications
+    if args.debug:
+        logger.info("\n🔧 Applying debug mode modifications...")
+        # Reduce data size
+        evaluator.manifest['train'] = evaluator.manifest['train'][:30]
+        evaluator.manifest['val'] = evaluator.manifest['val'][:10]
+        evaluator.manifest['test'] = evaluator.manifest['test'][:10]
+        logger.info(f"  - Train samples: 30 (original: {len(evaluator.manifest['train'])})")
+        logger.info(f"  - Val samples: 10")
+        logger.info(f"  - Test samples: 10")
+        evaluator.debug_mode = True
+    else:
+        evaluator.debug_mode = False
+
     summary = evaluator.evaluate_all_layers()
 
     logger.info(f"\n✓ Results saved to: {output_dir}")

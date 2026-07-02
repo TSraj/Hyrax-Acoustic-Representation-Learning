@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.utils.logging_utils import setup_logger
 
 
-def validate_manifest(manifest_path, data_dir, logger):
+def validate_manifest(manifest_path, data_dir, config, logger):
     """Validate a single manifest file."""
     logger.info(f"\n{'='*60}")
     logger.info(f"Validating: {manifest_path.name}")
@@ -88,24 +88,93 @@ def validate_manifest(manifest_path, data_dir, logger):
         logger.warning(f"⚠️  Severe class imbalance detected (ratio: {max(all_counts)/min(all_counts):.1f}x)")
         logger.warning(f"     Class weighting is CRITICAL for this dataset")
 
-    # Verify file paths exist
-    logger.info(f"\n📁 File Path Validation:")
+    # Verify file paths exist AND can be loaded
+    logger.info(f"\n📁 File Path & Audio Loading Validation:")
     missing_files = []
+    corrupt_files = []
+    short_files = []
+    long_files = []
+    silent_files = []
     checked_files = 0
 
+    from src.utils.audio_utils import load_audio
+
     for split_name, split_data in [('train', manifest['train']), ('val', manifest['val']), ('test', manifest['test'])]:
-        for item in split_data[:5]:  # Check first 5 from each split
+        for item in split_data[:10]:  # Check first 10 from each split (increased from 5)
             file_path = data_dir / item['file']
+
+            # Check if file exists
             if not file_path.exists():
                 missing_files.append((split_name, item['file']))
-            checked_files += 1
+                checked_files += 1
+                continue
+
+            # Try loading the audio file
+            try:
+                audio, sr = load_audio(str(file_path), target_sr=16000, mono=True)
+
+                # Check duration
+                duration = len(audio) / sr
+                min_duration = config.get('preprocessing', {}).get('min_duration', 0.05)
+                max_duration = config.get('preprocessing', {}).get('max_duration', 3600.0)
+
+                if duration < min_duration:
+                    short_files.append((split_name, item['file'], f"{duration:.3f}s"))
+                elif duration > max_duration:
+                    long_files.append((split_name, item['file'], f"{duration:.1f}s"))
+
+                # Check amplitude (detect near-silent files)
+                max_amplitude = abs(audio).max()
+                if max_amplitude < 0.01:  # Less than 1% of full scale
+                    silent_files.append((split_name, item['file'], f"max_amp={max_amplitude:.4f}"))
+
+                checked_files += 1
+
+            except Exception as e:
+                corrupt_files.append((split_name, item['file'], str(e)))
+                checked_files += 1
+
+    # Report results
+    logger.info(f"  Checked: {checked_files} samples (10 per split)")
 
     if missing_files:
-        logger.error(f"❌ Found {len(missing_files)} missing files (checked {checked_files} samples)")
+        logger.error(f"❌ Missing files: {len(missing_files)}")
         for split_name, file_path in missing_files[:3]:
-            logger.error(f"     {split_name}: {file_path}")
+            logger.error(f"     [{split_name}] {file_path}")
+
+    if corrupt_files:
+        logger.error(f"❌ Corrupt/unreadable files: {len(corrupt_files)}")
+        for split_name, file_path, error in corrupt_files[:3]:
+            logger.error(f"     [{split_name}] {file_path}")
+            logger.error(f"              Error: {error}")
+
+    if short_files:
+        logger.warning(f"⚠️  Very short files (< {config.get('preprocessing', {}).get('min_duration', 0.05)}s): {len(short_files)}")
+        for split_name, file_path, duration in short_files[:3]:
+            logger.warning(f"     [{split_name}] {file_path} ({duration})")
+
+    if long_files:
+        logger.info(f"ℹ️  Long files (> {config.get('preprocessing', {}).get('max_duration', 3600.0)}s): {len(long_files)}")
+        for split_name, file_path, duration in long_files[:3]:
+            logger.info(f"     [{split_name}] {file_path} ({duration})")
+        logger.info(f"     Note: Long files will be truncated during extraction")
+
+    if silent_files:
+        logger.warning(f"⚠️  Near-silent files (max amplitude < 0.01): {len(silent_files)}")
+        for split_name, file_path, amp_info in silent_files[:3]:
+            logger.warning(f"     [{split_name}] {file_path} ({amp_info})")
+
+    # Summary
+    issues_found = len(missing_files) + len(corrupt_files)
+    warnings_found = len(short_files) + len(silent_files)
+
+    if issues_found == 0 and warnings_found == 0:
+        logger.info(f"✓ All checked files are valid and loadable")
+    elif issues_found == 0:
+        logger.warning(f"⚠️  {warnings_found} warnings (files may still work but review recommended)")
     else:
-        logger.info(f"✓ All checked files exist ({checked_files} samples verified)")
+        logger.error(f"❌ {issues_found} critical issues found")
+        return False
 
     # Check class weights
     logger.info(f"\n⚖️  Class Weights:")
@@ -158,7 +227,7 @@ def main():
     results = {}
     for manifest_path in sorted(manifest_files):
         try:
-            success = validate_manifest(manifest_path, data_dir, logger)
+            success = validate_manifest(manifest_path, data_dir, config, logger)
             results[manifest_path.name] = success
         except Exception as e:
             logger.error(f"❌ Error validating {manifest_path.name}: {e}")

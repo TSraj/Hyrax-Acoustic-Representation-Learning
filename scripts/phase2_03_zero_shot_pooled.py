@@ -141,6 +141,11 @@ class PooledZeroShotEvaluator:
         if len(audio) > max_samples:
             audio = audio[:max_samples]
 
+        # Pad very short files (ECAPA needs minimum length)
+        min_samples = int(0.5 * 16000)  # Minimum 0.5 seconds
+        if len(audio) < min_samples:
+            audio = np.pad(audio, (0, min_samples - len(audio)), mode='constant')
+
         if self.model_type == "ecapa":
             with torch.no_grad():
                 embedding = self.model.encode_batch(torch.FloatTensor(audio).unsqueeze(0))
@@ -397,8 +402,14 @@ class PooledZeroShotEvaluator:
         self.logger.info(f"Training on Pooled Dataset")
         self.logger.info(f"{'='*60}")
 
-        max_epochs = 100
-        patience = 10
+        # Debug mode: reduce training
+        if hasattr(self, 'debug_mode') and self.debug_mode:
+            max_epochs = 3
+            patience = 2
+            self.logger.info(f"  - Debug mode: max_epochs={max_epochs}, patience={patience}")
+        else:
+            max_epochs = 100
+            patience = 10
 
         # Get embedding dimension
         sample_embedding = self.extract_embedding(
@@ -450,9 +461,13 @@ class PooledZeroShotEvaluator:
             lambda path: self.extract_embedding(path, layer_idx)
         )
 
-        train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=4, pin_memory=True)
-        val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, num_workers=4, pin_memory=True)
-        test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, num_workers=4, pin_memory=True)
+        # Use num_workers=0 on MPS (macOS), otherwise 4 for HPC
+        num_workers = 0 if self.device == 'mps' else 4
+        pin_memory = self.device == 'cuda'
+
+        train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=num_workers, pin_memory=pin_memory)
+        val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, num_workers=num_workers, pin_memory=pin_memory)
+        test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, num_workers=num_workers, pin_memory=pin_memory)
 
         # Train FC head
         fc_head = nn.Linear(embedding_dim, self.num_classes).to(self.device)
@@ -520,8 +535,12 @@ class PooledZeroShotEvaluator:
                 self.logger.info(f"Early stopping at epoch {epoch+1}")
                 break
 
-        # Restore best model
-        fc_head.load_state_dict(best_model_state)
+        # Restore best model (if any improvement happened)
+        if best_model_state is not None:
+            fc_head.load_state_dict(best_model_state)
+        else:
+            self.logger.warning(f"⚠️  No validation improvement. Using final epoch model.")
+            best_val_acc = val_acc
 
         # Test
         fc_head.eval()
@@ -634,6 +653,7 @@ def main():
     parser = argparse.ArgumentParser(description="Phase 2 - Zero-Shot Pooled Evaluation")
     parser.add_argument("--model", required=True, choices=["wav2vec2_base", "wav2vec2_base_960h", "xls_r", "wavlm", "ecapa_tdnn"])
     parser.add_argument("--layer", type=int, default=None, help="Layer to use (default: last layer)")
+    parser.add_argument("--debug", action="store_true", help="Debug mode: use small subset and reduce training")
     args = parser.parse_args()
 
     # Load configuration
@@ -648,6 +668,8 @@ def main():
     logger.info("PHASE 2 - STAGE 3: ZERO-SHOT POOLED EVALUATION")
     logger.info("="*80)
     logger.info(f"Model: {args.model}")
+    if args.debug:
+        logger.info("⚠️  DEBUG MODE ENABLED: Using small subset")
 
     # Get pooled manifest
     manifest_path = Path(config['paths']['output_dir']) / "phase2" / "manifests" / "pooled_manifest.json"
@@ -663,6 +685,20 @@ def main():
 
     # Run evaluation
     evaluator = PooledZeroShotEvaluator(config, args.model, manifest_path, output_dir, logger)
+
+    # Apply debug mode
+    if args.debug:
+        logger.info("\n🔧 Applying debug mode modifications...")
+        evaluator.manifest['train'] = evaluator.manifest['train'][:50]
+        evaluator.manifest['val'] = evaluator.manifest['val'][:20]
+        evaluator.manifest['test'] = evaluator.manifest['test'][:20]
+        logger.info(f"  - Train samples: 50")
+        logger.info(f"  - Val samples: 20")
+        logger.info(f"  - Test samples: 20")
+        evaluator.debug_mode = True
+    else:
+        evaluator.debug_mode = False
+
     summary = evaluator.run_full_evaluation(layer_idx=args.layer)
 
     logger.info(f"\n✓ Results saved to: {output_dir}")

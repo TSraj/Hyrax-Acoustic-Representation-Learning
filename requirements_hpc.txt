@@ -1,0 +1,33 @@
+# HPC Requirements (PyTorch pre-installed via module)
+# Use this if HPC has PyTorch pre-loaded via: module load pytorch
+# Install: pip install -r requirements_hpc.txt
+
+# Core dependencies
+numpy>=1.24.0
+scipy>=1.10.0
+pandas>=2.0.0
+
+# Audio processing
+librosa>=0.10.0
+soundfile>=0.12.0
+audioread>=3.0.0
+
+# Transformers and HuggingFace (works with pre-installed PyTorch)
+transformers>=4.30.0
+datasets>=2.14.0
+protobuf>=3.20.0
+speechbrain>=0.5.16  # Required for ECAPA-TDNN model
+
+# Dimensionality reduction and visualization
+scikit-learn>=1.3.0
+umap-learn>=0.5.3
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Machine learning (additional)
+xgboost>=2.0.0
+
+# Configuration and utilities
+PyYAML>=6.0
+tqdm>=4.65.0
+psutil>=5.9.0
