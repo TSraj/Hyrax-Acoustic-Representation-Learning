@@ -5,11 +5,12 @@ PROJECT_DIR="/home/hpc/iwi5/iwi5452h/project/Hyrax-Acoustic-Representation-Learn
 
 echo "Submitting debug pipeline jobs..."
 
-# Step 1: Validate manifests (no GPU)
+# Step 1: Validate manifests (needs GPU allocation even though not used)
 JOB1=$(sbatch --parsable << VALIDATE
 #!/bin/bash
 #SBATCH --job-name=01_validate
-#SBATCH --partition=work
+#SBATCH --partition=v100
+#SBATCH --gres=gpu:v100:1
 #SBATCH --cpus-per-task=2
 #SBATCH --time=00:10:00
 #SBATCH --output=logs/01_validate_%j.out
@@ -71,11 +72,12 @@ STAGE2B
 )
 echo "Job 2b (Stage2 wav2vec2+picidae): $JOB3"
 
-# Step 3: Aggregate Stage 2 (no GPU, depends on both stage2 jobs)
+# Step 3: Aggregate Stage 2 (needs GPU allocation even though not used)
 JOB4=$(sbatch --parsable --dependency=afterok:$JOB2:$JOB3 << AGGREGATE2
 #!/bin/bash
 #SBATCH --job-name=03_aggregate2
-#SBATCH --partition=work
+#SBATCH --partition=v100
+#SBATCH --gres=gpu:v100:1
 #SBATCH --cpus-per-task=2
 #SBATCH --time=00:10:00
 #SBATCH --output=logs/03_aggregate2_%j.out
@@ -135,11 +137,12 @@ STAGE3B
 )
 echo "Job 4b (Stage3 ecapa): $JOB6"
 
-# Step 5: Aggregate Stage 3 (no GPU, depends on both stage3 jobs)
+# Step 5: Aggregate Stage 3 (needs GPU allocation even though not used)
 JOB7=$(sbatch --parsable --dependency=afterok:$JOB5:$JOB6 << AGGREGATE3
 #!/bin/bash
 #SBATCH --job-name=05_aggregate3
-#SBATCH --partition=work
+#SBATCH --partition=v100
+#SBATCH --gres=gpu:v100:1
 #SBATCH --cpus-per-task=2
 #SBATCH --time=00:10:00
 #SBATCH --output=logs/05_aggregate3_%j.out
@@ -154,11 +157,12 @@ AGGREGATE3
 )
 echo "Job 5 (Aggregate Stage3): $JOB7"
 
-# Step 6: Model selection (no GPU, depends on aggregate3)
+# Step 6: Model selection (needs GPU allocation even though not used)
 JOB8=$(sbatch --parsable --dependency=afterok:$JOB7 << SELECTION
 #!/bin/bash
 #SBATCH --job-name=06_selection
-#SBATCH --partition=work
+#SBATCH --partition=v100
+#SBATCH --gres=gpu:v100:1
 #SBATCH --cpus-per-task=2
 #SBATCH --time=00:10:00
 #SBATCH --output=logs/06_selection_%j.out
@@ -194,11 +198,12 @@ FINETUNE
 )
 echo "Job 7 (Fine-tuning): $JOB9"
 
-# Step 8: Final report (no GPU, depends on fine-tuning)
+# Step 8: Final report (needs GPU allocation even though not used)
 JOB10=$(sbatch --parsable --dependency=afterok:$JOB9 << REPORT
 #!/bin/bash
 #SBATCH --job-name=08_report
-#SBATCH --partition=work
+#SBATCH --partition=v100
+#SBATCH --gres=gpu:v100:1
 #SBATCH --cpus-per-task=2
 #SBATCH --time=00:10:00
 #SBATCH --output=logs/08_report_%j.out
