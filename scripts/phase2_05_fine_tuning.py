@@ -650,28 +650,48 @@ class FineTuner:
         self.logger.info(f"  ✓ Training summary saved")
 
     def plot_confusion_matrix(self, cm, save_path):
-        """Plot confusion matrix."""
-        plt.figure(figsize=(max(12, self.num_classes * 0.3), max(10, self.num_classes * 0.25)))
+        """Plot confusion matrix with high quality and readable labels."""
+        # Dynamic figure size based on number of classes
+        fig_width = max(16, self.num_classes * 0.4)
+        fig_height = max(14, self.num_classes * 0.35)
+
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+
+        # Show labels only if <= 30 classes, otherwise too crowded
+        if self.num_classes <= 30:
+            xticklabels = self.manifest['individuals']
+            yticklabels = self.manifest['individuals']
+            fontsize = max(8, min(12, 300 // self.num_classes))  # Scale font with class count
+        else:
+            xticklabels = False
+            yticklabels = False
+            fontsize = 10
 
         sns.heatmap(
             cm,
-            annot=False,  # Too many classes for annotations
+            annot=False,  # No numbers in cells (too crowded)
             cmap='Blues',
-            xticklabels=self.manifest['individuals'] if self.num_classes <= 30 else False,
-            yticklabels=self.manifest['individuals'] if self.num_classes <= 30 else False,
-            cbar_kws={'label': 'Count'}
+            xticklabels=xticklabels,
+            yticklabels=yticklabels,
+            cbar_kws={'label': 'Count', 'shrink': 0.8},
+            linewidths=0,  # No grid lines for cleaner look
+            square=True,  # Square cells
+            ax=ax
         )
 
-        plt.title(f'Confusion Matrix - Fine-Tuned {self.model_name}\n{self.num_classes} Classes', fontweight='bold')
-        plt.ylabel('True Label', fontweight='bold')
-        plt.xlabel('Predicted Label', fontweight='bold')
+        # Title with clear info
+        ax.set_title(f'Confusion Matrix - Fine-Tuned {self.model_name}\n{self.num_classes} Classes',
+                     fontsize=16, fontweight='bold', pad=20)
+        ax.set_ylabel('True Label', fontsize=14, fontweight='bold')
+        ax.set_xlabel('Predicted Label', fontsize=14, fontweight='bold')
 
+        # Rotate labels if shown
         if self.num_classes <= 30:
-            plt.xticks(rotation=45, ha='right')
-            plt.yticks(rotation=0)
+            ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right', fontsize=fontsize)
+            ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=fontsize)
 
         plt.tight_layout()
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
         plt.close()
 
         self.logger.info(f"✓ Confusion matrix saved: {save_path}")
