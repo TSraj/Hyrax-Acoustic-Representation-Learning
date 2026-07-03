@@ -531,22 +531,29 @@ class PooledZeroShotEvaluator:
 
         # For transformer models: use cached embeddings
         if self.model_type == "transformer":
+            # Resolve layer_idx=None to actual last layer index
+            if layer_idx is None:
+                num_layers = len(self.model.encoder.layers)
+                actual_layer_idx = num_layers - 1
+            else:
+                actual_layer_idx = layer_idx
+
             # Check if this layer is already in memory cache
-            if layer_idx not in self.layer_cache:
-                self.layer_cache[layer_idx] = {}
+            if actual_layer_idx not in self.layer_cache:
+                self.layer_cache[actual_layer_idx] = {}
 
             # Load or extract embeddings for each split
             for split_name in ['train', 'val', 'test']:
-                if split_name not in self.layer_cache[layer_idx]:
+                if split_name not in self.layer_cache[actual_layer_idx]:
                     # Load all layers for this split (from disk cache or extract)
                     layer_embeddings, labels, num_layers = self.extract_all_layers_cached(split_name)
                     # Store in memory cache
-                    self.layer_cache[layer_idx][split_name] = (layer_embeddings[layer_idx], labels)
+                    self.layer_cache[actual_layer_idx][split_name] = (layer_embeddings[actual_layer_idx], labels)
 
             # Get cached embeddings for each split
-            train_emb, train_labels = self.layer_cache[layer_idx]['train']
-            val_emb, val_labels = self.layer_cache[layer_idx]['val']
-            test_emb, test_labels = self.layer_cache[layer_idx]['test']
+            train_emb, train_labels = self.layer_cache[actual_layer_idx]['train']
+            val_emb, val_labels = self.layer_cache[actual_layer_idx]['val']
+            test_emb, test_labels = self.layer_cache[actual_layer_idx]['test']
 
             # Create TensorDatasets
             train_dataset = TensorDataset(torch.FloatTensor(train_emb), torch.LongTensor(train_labels))
