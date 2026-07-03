@@ -14,20 +14,40 @@ module load cuda/11.8.0
 module load python/3.12-conda
 source venv/bin/activate
 
+echo "Starting pre-download at $(date)"
+echo "HF_TOKEN set: ${HF_TOKEN:0:10}..."
+echo ""
+
 # Set HF token from environment variable
 # Before running: export HF_TOKEN=your_token_here
 # Or set in ~/.bashrc: export HF_TOKEN=hf_your_token
 
-python << 'PYEOF'
+# Use unbuffered Python for immediate output
+python -u << 'PYEOF'
+import sys
+import os
+from datetime import datetime
+
+def log(msg):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+log("="*80)
+log("PRE-DOWNLOADING MODELS TO CACHE")
+log("="*80)
+
+# Check HF token
+token = os.getenv('HF_TOKEN')
+if token:
+    log(f"✓ HF_TOKEN found: {token[:10]}...")
+else:
+    log("⚠ WARNING: HF_TOKEN not set - downloads may be rate-limited")
+
+log("")
+
 from transformers import (
     Wav2Vec2Model, Wav2Vec2Processor,
     WavLMModel
 )
 import torch
-
-print("=" * 80)
-print("PRE-DOWNLOADING ALL MODELS TO CACHE")
-print("=" * 80)
 
 models = {
     "wav2vec2_base": "facebook/wav2vec2-base",
@@ -36,23 +56,35 @@ models = {
     "wavlm": "microsoft/wavlm-base-plus",
 }
 
-for name, model_id in models.items():
-    print(f"\n[{name}] Downloading {model_id}...")
+for i, (name, model_id) in enumerate(models.items(), 1):
+    log(f"[{i}/4] {name}: Starting download from {model_id}")
     try:
+        log(f"  → Downloading model...")
         if "wavlm" in name:
             model = WavLMModel.from_pretrained(model_id)
-            processor = Wav2Vec2Processor.from_pretrained(model_id)  # WavLM uses Wav2Vec2Processor
         else:
             model = Wav2Vec2Model.from_pretrained(model_id)
-            processor = Wav2Vec2Processor.from_pretrained(model_id)
-        print(f"[{name}] ✓ Downloaded successfully")
+
+        log(f"  → Downloading processor...")
+        processor = Wav2Vec2Processor.from_pretrained(model_id)
+
+        log(f"  ✓ {name} downloaded successfully")
+
+        # Cleanup
         del model, processor
         torch.cuda.empty_cache()
-    except Exception as e:
-        print(f"[{name}] ✗ Error: {e}")
 
-print("\n" + "=" * 80)
-print("ECAPA-TDNN (speechbrain) will download on first use - cannot pre-cache")
-print("All downloadable models cached successfully!")
-print("=" * 80)
+    except Exception as e:
+        log(f"  ✗ {name} failed: {str(e)[:100]}")
+        sys.exit(1)
+
+    log("")
+
+log("="*80)
+log("NOTE: ECAPA-TDNN (speechbrain) downloads on first use")
+log("All transformers models cached successfully!")
+log("="*80)
 PYEOF
+
+echo ""
+echo "Pre-download completed at $(date)"
