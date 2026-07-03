@@ -61,12 +61,12 @@ for i, (name, model_id) in enumerate(models.items(), 1):
     try:
         log(f"  → Downloading model...")
         if "wavlm" in name:
-            model = WavLMModel.from_pretrained(model_id)
+            model = WavLMModel.from_pretrained(model_id, trust_remote_code=False)
         else:
-            model = Wav2Vec2Model.from_pretrained(model_id)
+            model = Wav2Vec2Model.from_pretrained(model_id, trust_remote_code=False)
 
         log(f"  → Downloading processor...")
-        processor = Wav2Vec2Processor.from_pretrained(model_id)
+        processor = Wav2Vec2Processor.from_pretrained(model_id, trust_remote_code=False)
 
         log(f"  ✓ {name} downloaded successfully")
 
