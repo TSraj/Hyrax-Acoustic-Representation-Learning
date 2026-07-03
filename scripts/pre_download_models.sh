@@ -21,7 +21,7 @@ source venv/bin/activate
 python << 'PYEOF'
 from transformers import (
     Wav2Vec2Model, Wav2Vec2Processor,
-    WavLMModel, WavLMProcessor
+    WavLMModel
 )
 import torch
 
@@ -41,7 +41,7 @@ for name, model_id in models.items():
     try:
         if "wavlm" in name:
             model = WavLMModel.from_pretrained(model_id)
-            processor = WavLMProcessor.from_pretrained(model_id)
+            processor = Wav2Vec2Processor.from_pretrained(model_id)  # WavLM uses Wav2Vec2Processor
         else:
             model = Wav2Vec2Model.from_pretrained(model_id)
             processor = Wav2Vec2Processor.from_pretrained(model_id)
