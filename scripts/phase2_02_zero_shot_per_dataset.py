@@ -135,6 +135,11 @@ class ZeroShotEvaluator:
 
         self.logger.info(f"✓ Model loaded and frozen: {self.model_name}")
 
+        # Initialize cache
+        self.layer_cache = {}  # {layer_idx: {split: (embeddings, labels)}}
+        self.cache_dir = self.output_dir / "embedding_cache"
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
     def extract_embedding(self, audio_path, layer_idx=None):
         """
         Extract embedding from audio file.
@@ -191,7 +196,101 @@ class ZeroShotEvaluator:
 
             return embedding
 
-    def create_dataloader(self, split, layer_idx=None, batch_size=32):
+    def extract_all_layers_cached(self, split):
+        """
+        Extract embeddings from ALL layers for a given split and cache them.
+        This is called ONCE before evaluating any layer.
+
+        Args:
+            split: 'train', 'val', or 'test'
+        """
+        import pickle
+
+        cache_file = self.cache_dir / f"{split}_all_layers.pkl"
+
+        # Check if cache exists
+        if cache_file.exists():
+            self.logger.info(f"  → Loading cached embeddings from {cache_file.name}")
+            with open(cache_file, 'rb') as f:
+                cache_data = pickle.load(f)
+            return cache_data['layer_embeddings'], cache_data['labels'], cache_data['num_layers']
+
+        # Extract all layers for all samples
+        self.logger.info(f"  → Extracting ALL layers for {split} split (will be cached)...")
+
+        items = self.manifest[split]
+        data_dir = Path(self.config['paths']['data_dir'])
+
+        all_samples_all_layers = []  # [sample_idx][layer_idx] -> embedding
+        all_labels = []
+
+        for item in tqdm(items, desc=f"Extracting {split}"):
+            audio_path = str(data_dir / item['file'])
+            individual = item['individual']
+            label = self.class_to_idx[individual]
+
+            # Extract from ALL layers at once
+            audio, sr = load_audio(audio_path, target_sr=16000, mono=True)
+
+            # Truncate long files
+            max_duration = self.config.get('feature_extraction', {}).get('max_audio_duration', 30)
+            max_samples = int(max_duration * 16000)
+            if len(audio) > max_samples:
+                audio = audio[:max_samples]
+
+            # Pad very short files
+            min_samples = int(0.5 * 16000)
+            if len(audio) < min_samples:
+                audio = np.pad(audio, (0, min_samples - len(audio)), mode='constant')
+
+            # Process audio
+            inputs = self.feature_extractor(
+                audio,
+                sampling_rate=16000,
+                return_tensors="pt",
+                padding=True
+            )
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+            with torch.no_grad():
+                outputs = self.model(**inputs, output_hidden_states=True)
+
+            hidden_states = outputs.hidden_states
+
+            # Extract embeddings from ALL layers
+            sample_layer_embeddings = []
+            for layer_output in hidden_states:
+                embedding = layer_output.mean(dim=1).squeeze().cpu().numpy()
+                sample_layer_embeddings.append(embedding)
+
+            all_samples_all_layers.append(sample_layer_embeddings)
+            all_labels.append(label)
+
+        num_layers = len(all_samples_all_layers[0])
+
+        # Reorganize: layer_embeddings[layer_idx] = array of shape (num_samples, embedding_dim)
+        layer_embeddings = {}
+        for layer_idx in range(num_layers):
+            embeddings = np.array([sample[layer_idx] for sample in all_samples_all_layers])
+            layer_embeddings[layer_idx] = embeddings
+
+        labels = np.array(all_labels)
+
+        # Cache to disk
+        cache_data = {
+            'layer_embeddings': layer_embeddings,
+            'labels': labels,
+            'num_layers': num_layers
+        }
+        with open(cache_file, 'wb') as f:
+            pickle.dump(cache_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+        cache_size_mb = cache_file.stat().st_size / (1024 * 1024)
+        self.logger.info(f"  ✓ Cached {num_layers} layers for {len(items)} samples ({cache_size_mb:.1f} MB)")
+
+        return layer_embeddings, labels, num_layers
+
+    def create_dataloader(self, split, layer_idx=None, batch_size=32, use_cache=True):
         """
         Create PyTorch dataloader for a split.
 
@@ -199,39 +298,63 @@ class ZeroShotEvaluator:
             split: 'train', 'val', or 'test'
             layer_idx: Layer to extract from (for transformer models)
             batch_size: Batch size
+            use_cache: Use cached embeddings if available (transformer models only)
 
         Returns:
             DataLoader
         """
-        from torch.utils.data import Dataset, DataLoader
+        from torch.utils.data import Dataset, DataLoader, TensorDataset
 
-        class AudioDataset(Dataset):
-            def __init__(self, manifest_items, class_to_idx, data_dir, extractor_fn):
-                self.items = manifest_items
-                self.class_to_idx = class_to_idx
-                self.data_dir = Path(data_dir)
-                self.extractor_fn = extractor_fn
+        # For transformer models with caching enabled
+        if self.model_type == "transformer" and use_cache:
+            # Check if this split+layer is already in memory cache
+            if layer_idx not in self.layer_cache:
+                self.layer_cache[layer_idx] = {}
 
-            def __len__(self):
-                return len(self.items)
+            if split not in self.layer_cache[layer_idx]:
+                # Load all layers for this split (from disk cache or extract)
+                layer_embeddings, labels, num_layers = self.extract_all_layers_cached(split)
+                # Store in memory cache
+                self.layer_cache[layer_idx][split] = (layer_embeddings[layer_idx], labels)
 
-            def __getitem__(self, idx):
-                item = self.items[idx]
-                audio_path = self.data_dir / item['file']
-                individual = item['individual']
-                label = self.class_to_idx[individual]
+            # Get embeddings for this specific layer
+            embeddings, labels = self.layer_cache[layer_idx][split]
 
-                # Extract embedding
-                embedding = self.extractor_fn(str(audio_path))
+            # Create TensorDataset from cached embeddings
+            dataset = TensorDataset(
+                torch.FloatTensor(embeddings),
+                torch.LongTensor(labels)
+            )
 
-                return embedding, label
+        else:
+            # Fallback: extract on-the-fly (for ECAPA or when cache disabled)
+            class AudioDataset(Dataset):
+                def __init__(self, manifest_items, class_to_idx, data_dir, extractor_fn):
+                    self.items = manifest_items
+                    self.class_to_idx = class_to_idx
+                    self.data_dir = Path(data_dir)
+                    self.extractor_fn = extractor_fn
 
-        dataset = AudioDataset(
-            self.manifest[split],
-            self.class_to_idx,
-            Path(self.config['paths']['data_dir']),
-            lambda path: self.extract_embedding(path, layer_idx)
-        )
+                def __len__(self):
+                    return len(self.items)
+
+                def __getitem__(self, idx):
+                    item = self.items[idx]
+                    audio_path = self.data_dir / item['file']
+                    individual = item['individual']
+                    label = self.class_to_idx[individual]
+
+                    # Extract embedding
+                    embedding = self.extractor_fn(str(audio_path))
+
+                    return embedding, label
+
+            dataset = AudioDataset(
+                self.manifest[split],
+                self.class_to_idx,
+                Path(self.config['paths']['data_dir']),
+                lambda path: self.extract_embedding(path, layer_idx)
+            )
 
         # Use num_workers=0 to avoid CUDA fork errors in multiprocessing
         num_workers = 0
