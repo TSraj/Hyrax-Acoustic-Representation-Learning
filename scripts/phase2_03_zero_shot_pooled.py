@@ -48,10 +48,24 @@ class PooledZeroShotEvaluator:
         self.idx_to_class = {idx: ind for ind, idx in self.class_to_idx.items()}
 
         # Map individuals to source datasets
+        # Known datasets (handles multi-word names like "bengalese_finch")
+        known_datasets = ['anuraset', 'bengalese_finch', 'macaque', 'marmoset',
+                          'picidae', 'wetlands_bird', 'zebra_finch']
+
         self.individual_to_dataset = {}
         for individual in self.manifest['individuals']:
             # Individual format: "dataset_individualname"
-            dataset = individual.split('_')[0]
+            # Try matching known datasets (longest match first for multi-word names)
+            dataset = None
+            for ds in sorted(known_datasets, key=len, reverse=True):
+                if individual.startswith(ds + '_'):
+                    dataset = ds
+                    break
+
+            if dataset is None:
+                # Fallback: take first part before underscore
+                dataset = individual.split('_')[0]
+
             self.individual_to_dataset[individual] = dataset
 
         # Get unique datasets
