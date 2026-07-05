@@ -769,7 +769,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="Phase 2 - Fine-Tuning")
     parser.add_argument("--model", help="Model to fine-tune (default: load from Stage 4 selection)")
-    parser.add_argument("--batch-size", type=int, default=16, help="Batch size (default: 16)")
+    parser.add_argument("--batch-size", type=int, default=8, help="Batch size (default: 8)")
     parser.add_argument("--max-epochs", type=int, default=50, help="Max epochs (default: 50)")
     parser.add_argument("--patience", type=int, default=10, help="Early stopping patience (default: 10)")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate (default: 1e-4)")
