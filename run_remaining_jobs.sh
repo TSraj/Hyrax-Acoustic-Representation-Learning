@@ -28,7 +28,7 @@ JOB_FINETUNE=$(sbatch --parsable << 'FINETUNE'
 #SBATCH --partition=v100
 #SBATCH --gres=gpu:v100:1
 #SBATCH --cpus-per-task=4
-#SBATCH --time=12:00:00
+#SBATCH --time=20:00:00
 #SBATCH --output=logs/07_finetune_%j.out
 #SBATCH --error=logs/07_finetune_%j.err
 
@@ -73,10 +73,10 @@ echo "JOBS SUBMITTED SUCCESSFULLY!"
 echo "=========================================="
 echo ""
 echo "Summary:"
-echo "  • Fine-tuning: 1 job (12h, batch_size=8)"
+echo "  • Fine-tuning: 1 job (20h, batch_size=8, max_epochs=16)"
 echo "  • Final report: 1 job (10 min)"
 echo ""
-echo "Total time: ~12 hours"
+echo "Total time: ~19 hours (may finish earlier with early stopping)"
 echo ""
 echo "Monitor: squeue -u \$USER"
 echo "Logs directory: logs/"
