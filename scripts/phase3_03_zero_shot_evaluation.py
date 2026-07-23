@@ -184,8 +184,14 @@ class ZeroShotEvaluator:
 
         else:  # ECAPA
             with torch.no_grad():
+                # encode_batch returns [batch, embedding_dim]
                 embedding = self.model.encode_batch(torch.FloatTensor(audio).unsqueeze(0))
-                return embedding.squeeze(0).cpu().numpy()
+                # Squeeze batch dimension to get [embedding_dim]
+                embedding = embedding.squeeze(0)
+                # If still 2D (has time dimension), take mean
+                if embedding.dim() > 1:
+                    embedding = embedding.mean(dim=0)
+                return embedding.cpu().numpy()
 
     def extract_embeddings_for_split(self, split_name):
         """Extract embeddings for all items in a split."""
