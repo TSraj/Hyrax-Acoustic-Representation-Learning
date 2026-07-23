@@ -5,7 +5,6 @@
 #SBATCH --time=20:00:00
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
-#SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 
 # Phase 3 Part 1: Extract + Manifests + Zero-Shot Evaluation

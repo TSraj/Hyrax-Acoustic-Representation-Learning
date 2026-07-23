@@ -5,7 +5,6 @@
 #SBATCH --time=15:00:00
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
-#SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
 
 # Phase 3 Part 2: Model Selection + Fine-Tuning + Analysis
