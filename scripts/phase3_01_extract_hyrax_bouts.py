@@ -116,7 +116,7 @@ def main():
     logger.info("=" * 80)
 
     # Paths
-    data_root = Path("data/YearLocation")
+    data_root = Path("Data/YearLocation")
     output_dir = Path("outputs/phase3/hyrax_data")
     output_dir.mkdir(parents=True, exist_ok=True)
 
