@@ -5,7 +5,7 @@
 PROJECT_DIR="/home/hpc/iwi5/iwi5452h/project/Hyrax-Acoustic-Representation-Learning"
 
 # All models and datasets
-MODELS=("wav2vec2_base" "wav2vec2_base_960h" "xls_r" "wavlm" "ecapa_tdnn")
+MODELS=("wav2vec2_base" "wav2vec2_base_960h" "hubert_base" "xls_r" "wavlm" "ecapa_tdnn")
 DATASETS=("anuraset" "bengalese_finch" "macaque" "marmoset" "picidae" "wetlands_bird" "zebra_finch")
 
 # Configuration

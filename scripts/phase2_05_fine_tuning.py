@@ -141,6 +141,12 @@ class FineTuner:
             self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_id)
             self.backbone = Wav2Vec2Model.from_pretrained(model_id, use_safetensors=True)
 
+        elif self.model_name == "hubert_base":
+            model_id = "facebook/hubert-base-ls960"
+            self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_id)
+            from transformers import HubertModel
+            self.backbone = HubertModel.from_pretrained(model_id, use_safetensors=True)
+
         elif self.model_name == "xls_r":
             model_id = "facebook/wav2vec2-xls-r-300m"
             self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_id)

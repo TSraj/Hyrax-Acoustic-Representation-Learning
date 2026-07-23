@@ -35,7 +35,7 @@ class ZeroShotEvaluator:
 
         Args:
             config: Configuration dictionary
-            model_name: One of: wav2vec2_base, wav2vec2_base_960h, xls_r, wavlm, ecapa_tdnn
+            model_name: One of: wav2vec2_base, wav2vec2_base_960h, hubert_base, xls_r, wavlm, ecapa_tdnn
             manifest_path: Path to dataset manifest JSON
             output_dir: Output directory for results
             logger: Logger instance
@@ -97,6 +97,14 @@ class ZeroShotEvaluator:
             model_id = "facebook/wav2vec2-base-960h"
             self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_id)
             self.model = Wav2Vec2Model.from_pretrained(model_id, use_safetensors=True)
+            self.model_type = "transformer"
+
+        elif self.model_name == "hubert_base":
+            # HuBERT Base (960h LibriSpeech)
+            model_id = "facebook/hubert-base-ls960"
+            self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_id)
+            from transformers import HubertModel
+            self.model = HubertModel.from_pretrained(model_id, use_safetensors=True)
             self.model_type = "transformer"
 
         elif self.model_name == "xls_r":
@@ -698,7 +706,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Phase 2 - Zero-Shot Per-Dataset Evaluation")
-    parser.add_argument("--model", required=True, choices=["wav2vec2_base", "wav2vec2_base_960h", "xls_r", "wavlm", "ecapa_tdnn"])
+    parser.add_argument("--model", required=True, choices=["wav2vec2_base", "wav2vec2_base_960h", "hubert_base", "xls_r", "wavlm", "ecapa_tdnn"])
     parser.add_argument("--dataset", required=True, help="Dataset key (e.g., macaque, anuraset)")
     parser.add_argument("--batch-size", type=int, default=64, help="Batch size (default: 64 for HPC)")
     parser.add_argument("--debug", action="store_true", help="Debug mode: use small subset and test only 2 layers")

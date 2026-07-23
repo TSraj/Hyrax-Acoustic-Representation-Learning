@@ -113,6 +113,13 @@ class PooledZeroShotEvaluator:
             self.model = Wav2Vec2Model.from_pretrained(model_id, use_safetensors=True)
             self.model_type = "transformer"
 
+        elif self.model_name == "hubert_base":
+            model_id = "facebook/hubert-base-ls960"
+            self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_id)
+            from transformers import HubertModel
+            self.model = HubertModel.from_pretrained(model_id, use_safetensors=True)
+            self.model_type = "transformer"
+
         elif self.model_name == "xls_r":
             model_id = "facebook/wav2vec2-xls-r-300m"
             self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_id)
@@ -805,7 +812,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Phase 2 - Zero-Shot Pooled Evaluation")
-    parser.add_argument("--model", required=True, choices=["wav2vec2_base", "wav2vec2_base_960h", "xls_r", "wavlm", "ecapa_tdnn"])
+    parser.add_argument("--model", required=True, choices=["wav2vec2_base", "wav2vec2_base_960h", "hubert_base", "xls_r", "wavlm", "ecapa_tdnn"])
     parser.add_argument("--layer", type=int, default=None, help="Layer to use (default: last layer)")
     parser.add_argument("--debug", action="store_true", help="Debug mode: use small subset and reduce training")
     args = parser.parse_args()
