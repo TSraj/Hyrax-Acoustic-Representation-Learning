@@ -103,8 +103,7 @@ echo "Step 3: Zero-shot pooled evaluation"
 echo "=========================================="
 
 python scripts/phase2_03_zero_shot_pooled.py \
-    --model "$MODEL" \
-    --batch-size 8
+    --model "$MODEL"
 
 echo "✓ Pooled evaluation complete"
 
