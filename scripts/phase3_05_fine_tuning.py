@@ -272,7 +272,7 @@ class FineTuner:
                 try:
                     file_path = item['file']
                     if not Path(file_path).exists() and not file_path.startswith('outputs/'):
-                        file_path = f"data/{file_path}"
+                        file_path = f"Data/{file_path}"
 
                     # Extract embedding
                     embedding = self.extract_embedding(file_path)
@@ -356,7 +356,7 @@ class FineTuner:
                 try:
                     file_path = item['file']
                     if not Path(file_path).exists() and not file_path.startswith('outputs/'):
-                        file_path = f"data/{file_path}"
+                        file_path = f"Data/{file_path}"
 
                     embedding = self.extract_embedding(file_path)
 
@@ -398,7 +398,7 @@ class FineTuner:
                 try:
                     file_path = item['file']
                     if not Path(file_path).exists() and not file_path.startswith('outputs/'):
-                        file_path = f"data/{file_path}"
+                        file_path = f"Data/{file_path}"
 
                     embedding = self.extract_embedding(file_path)
 

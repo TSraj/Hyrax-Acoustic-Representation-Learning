@@ -99,7 +99,7 @@ def analyze_per_sample_performance(manifest_path, predictions, model_name, task,
         # Get file path
         file_path = item['file']
         if not Path(file_path).exists() and not file_path.startswith('outputs/'):
-            file_path = f"data/{file_path}"
+            file_path = f"Data/{file_path}"
 
         # Extract features
         features = extract_acoustic_features(file_path)

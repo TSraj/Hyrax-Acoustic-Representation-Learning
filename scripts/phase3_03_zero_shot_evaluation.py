@@ -209,7 +209,7 @@ class ZeroShotEvaluator:
                 # Handle Phase 2 paths (relative to data/ folder)
                 if not Path(file_path).exists() and not file_path.startswith('outputs/'):
                     # Phase 2 files are in data/ folder
-                    file_path = f"data/{file_path}"
+                    file_path = f"Data/{file_path}"
 
                 embedding = self.extract_embedding(file_path)
 
