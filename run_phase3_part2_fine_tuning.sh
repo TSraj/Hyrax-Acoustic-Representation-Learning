@@ -1,23 +1,30 @@
 #!/bin/bash
 #SBATCH --job-name=phase3_part2
+#SBATCH --partition=v100
+#SBATCH --gres=gpu:v100:1
+#SBATCH --cpus-per-task=2
+#SBATCH --time=15:00:00
 #SBATCH --output=logs/phase3_part2_%j.out
 #SBATCH --error=logs/phase3_part2_%j.err
-#SBATCH --time=15:00:00
-#SBATCH --partition=gpu
-#SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=8
 
 # Phase 3 Part 2: Model Selection + Fine-Tuning + Analysis
 # Steps 4-8 (requires Part 1 completed)
 
 set -e  # Exit on error
 
+PROJECT_DIR="/home/hpc/iwi5/iwi5452h/project/Hyrax-Acoustic-Representation-Learning"
+cd "$PROJECT_DIR"
+
 echo "========================================"
 echo "PHASE 3 - PART 2: FINE-TUNING & ANALYSIS"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Node: $SLURM_NODELIST"
 echo "Started: $(date)"
 echo "========================================"
 
-# Activate environment
+# Load modules
+module load cuda/11.8.0
+module load python/3.12-conda
 source venv/bin/activate
 
 # Create log directory
