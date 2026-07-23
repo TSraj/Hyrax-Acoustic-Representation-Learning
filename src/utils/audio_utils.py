@@ -32,6 +32,21 @@ def load_audio(
         raise ValueError(f"Error loading audio file {file_path}: {str(e)}")
 
 
+def save_audio(file_path: str, audio: np.ndarray, sr: int = 16000) -> None:
+    """
+    Save audio array to file.
+
+    Args:
+        file_path: Output file path
+        audio: Audio signal array
+        sr: Sample rate (default: 16000)
+    """
+    try:
+        sf.write(file_path, audio, sr)
+    except Exception as e:
+        raise ValueError(f"Error saving audio to {file_path}: {str(e)}")
+
+
 def get_audio_info(file_path: str) -> dict:
     """
     Get metadata information about an audio file.
