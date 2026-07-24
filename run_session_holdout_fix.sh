@@ -2,7 +2,7 @@
 #SBATCH --job-name=session_holdout_fix
 #SBATCH --partition=v100
 #SBATCH --gres=gpu:v100:1
-#SBATCH --time=2:00:00
+#SBATCH --time=4:00:00
 #SBATCH --output=logs/session_holdout_fix_%j.out
 #SBATCH --error=logs/session_holdout_fix_%j.err
 
