@@ -84,91 +84,6 @@ def split_individuals(individuals, train_ratio=0.8, val_ratio=0.1, seed=42):
     return train_ids, val_ids, test_ids
 
 
-def create_hyrax_id_manifest(hyrax_data, train_ids, val_ids, test_ids, output_dir, logger):
-    """
-    Create manifest for Hyrax ID task (18-individual classification).
-
-    Args:
-        hyrax_data: Dict of {individual_id: {file, duration, sample_rate}}
-        train_ids, val_ids, test_ids: Individual ID lists for each split
-        output_dir: Output directory
-        logger: Logger instance
-    """
-    logger.info("\n" + "=" * 80)
-    logger.info("CREATING HYRAX ID MANIFEST (18-class individual identification)")
-    logger.info("=" * 80)
-
-    # All individuals
-    all_individuals = sorted(hyrax_data.keys())
-
-    # Create class mapping
-    class_to_idx = {ind: idx for idx, ind in enumerate(all_individuals)}
-
-    # Build splits
-    splits = {
-        'train': train_ids,
-        'val': val_ids,
-        'test': test_ids
-    }
-
-    for split_name, individual_ids in splits.items():
-        items = []
-
-        for individual_id in individual_ids:
-            items.append({
-                'file': hyrax_data[individual_id]['file'],
-                'individual': individual_id,
-                'duration': hyrax_data[individual_id]['duration']
-            })
-
-        logger.info(f"\n{split_name.upper()} split:")
-        logger.info(f"  Individuals: {len(individual_ids)}")
-        logger.info(f"  Files: {len(items)}")
-        logger.info(f"  Total duration: {sum(item['duration'] for item in items)/60:.2f} min")
-
-    # Class weights (inverse frequency)
-    class_counts = {ind: 1 for ind in all_individuals}  # Each individual has 1 concatenated file
-    total_samples = len(all_individuals)
-    class_weights = {ind: total_samples / (len(all_individuals) * count)
-                     for ind, count in class_counts.items()}
-
-    # Create manifest
-    manifest = {
-        'task': 'hyrax_id',
-        'description': '18-class hyrax individual identification',
-        'num_classes': len(all_individuals),
-        'individuals': all_individuals,
-        'class_to_idx': class_to_idx,
-        'class_weights': class_weights,
-        'splits': {
-            'train': [{'file': hyrax_data[ind]['file'],
-                      'individual': ind,
-                      'duration': hyrax_data[ind]['duration']}
-                     for ind in train_ids],
-            'val': [{'file': hyrax_data[ind]['file'],
-                    'individual': ind,
-                    'duration': hyrax_data[ind]['duration']}
-                   for ind in val_ids],
-            'test': [{'file': hyrax_data[ind]['file'],
-                     'individual': ind,
-                     'duration': hyrax_data[ind]['duration']}
-                    for ind in test_ids]
-        },
-        'split_counts': {
-            'train': len(train_ids),
-            'val': len(val_ids),
-            'test': len(test_ids)
-        }
-    }
-
-    # Save manifest
-    manifest_file = output_dir / "hyrax_id_manifest.json"
-    with open(manifest_file, 'w') as f:
-        json.dump(manifest, f, indent=2)
-
-    logger.info(f"\n✓ Hyrax ID manifest saved: {manifest_file}")
-
-    return manifest
 
 
 def create_species_id_manifest(hyrax_data, train_ids, val_ids, test_ids,
@@ -319,7 +234,7 @@ def create_species_id_manifest(hyrax_data, train_ids, val_ids, test_ids,
     }
 
     # Save manifest
-    manifest_file = output_dir / "species_id_manifest.json"
+    manifest_file = output_dir / "species_id.json"
     with open(manifest_file, 'w') as f:
         json.dump(manifest, f, indent=2)
 
@@ -624,7 +539,7 @@ def main():
     logger.info(f"  - hyrax_session_profile.json")
     logger.info(f"  - hyrax_id.json ({hyrax_id_manifest['num_classes']} classes - MAIN TASK)")
     logger.info(f"  - hyrax_id_session_holdout.json ({session_holdout_manifest['num_classes']} classes - DIAGNOSTIC)")
-    logger.info(f"  - species_id_manifest.json (8 classes)")
+    logger.info(f"  - species_id.json (8 classes)")
     logger.info("\n✓ Ready for experiments!")
 
 

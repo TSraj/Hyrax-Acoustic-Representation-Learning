@@ -289,7 +289,7 @@ def main():
     logger.info("=" * 80)
 
     # Load manifest
-    manifest_path = Path(f"outputs/phase3/manifests/{args.task}_manifest.json")
+    manifest_path = Path(f"outputs/phase3/manifests/{args.task}.json")
 
     # Analyze acoustic features
     logger.info(f"\nAnalyzing task: {args.task}")

@@ -495,7 +495,7 @@ def main():
     )
 
     # Paths
-    manifest_path = Path(f"outputs/phase3/manifests/{args.task}_manifest.json")
+    manifest_path = Path(f"outputs/phase3/manifests/{args.task}.json")
     output_dir = Path(f"outputs/phase3/fine_tuning/{args.task}/{args.model}")
 
     # Load zero-shot baseline
