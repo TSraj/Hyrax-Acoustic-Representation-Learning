@@ -468,12 +468,22 @@ def create_session_holdout_manifest(bouts_per_individual, session_profile, outpu
                 'held_out_session': held_out[ind] if split_name == 'test' else None
             })
 
+    # Class weights (inverse frequency based on train split)
+    train_class_counts = defaultdict(int)
+    for item in manifest_splits['train']:
+        train_class_counts[item['individual']] += 1
+
+    total_train = len(manifest_splits['train'])
+    class_weights = {ind: total_train / (len(target) * train_class_counts[ind])
+                     for ind in target}
+
     manifest = {
         'task': 'hyrax_id_session_holdout',
         'description': 'Session holdout diagnostic - 4 individuals with held-out sessions to test for recording leakage',
         'num_classes': len(target),
         'individuals': sorted(target),
         'class_to_idx': {ind: idx for idx, ind in enumerate(sorted(target))},
+        'class_weights': class_weights,
         'held_out_sessions': held_out,
         'splits': manifest_splits,
         'split_counts': {k: len(v) for k, v in manifest_splits.items()},

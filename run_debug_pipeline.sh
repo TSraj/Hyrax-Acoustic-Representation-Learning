@@ -1,9 +1,49 @@
 #!/bin/bash
-# Master script to run full debug pipeline with job dependencies
+# Phase 2 Pipeline Script
+# Usage:
+#   - Debug mode (default): bash run_debug_pipeline.sh
+#   - Full mode: bash run_debug_pipeline.sh --full
 
 PROJECT_DIR="/home/hpc/iwi5/iwi5452h/project/Hyrax-Acoustic-Representation-Learning"
 
-echo "Submitting debug pipeline jobs..."
+# Check mode
+if [[ "$1" == "--full" ]]; then
+    MODE="full"
+    echo "=========================================="
+    echo "FULL PHASE 2 PIPELINE"
+    echo "=========================================="
+    MODELS=("wav2vec2_base" "wav2vec2_base_960h" "xls_r" "wavlm" "ecapa_tdnn")
+    DATASETS=("anuraset" "bengalese_finch" "macaque" "marmoset" "picidae" "wetlands_bird" "zebra_finch")
+    STAGE2_TIME="02:30:00"
+    STAGE3_TIME="06:00:00"
+    FINETUNE_TIME="12:00:00"
+    DEBUG_FLAG=""
+    echo "Models: ${MODELS[@]}"
+    echo "Datasets: ${DATASETS[@]}"
+    echo "Total Stage 2 jobs: $((${#MODELS[@]} * ${#DATASETS[@]})) = 35"
+    echo "Total Stage 3 jobs: ${#MODELS[@]} = 5"
+    echo "Estimated completion: 24-30 hours"
+else
+    MODE="debug"
+    echo "=========================================="
+    echo "DEBUG PHASE 2 PIPELINE"
+    echo "=========================================="
+    MODELS=("wav2vec2_base")
+    DATASETS=("anuraset" "picidae")
+    STAGE2_TIME="00:45:00"
+    STAGE3_TIME="00:45:00"
+    FINETUNE_TIME="01:00:00"
+    DEBUG_FLAG="--debug"
+    echo "Models: ${MODELS[@]}"
+    echo "Datasets: ${DATASETS[@]}"
+    echo "Total Stage 2 jobs: 2"
+    echo "Total Stage 3 jobs: 2 (wav2vec2_base, ecapa_tdnn)"
+    echo "Estimated completion: 2-3 hours"
+fi
+echo "=========================================="
+echo ""
+
+echo "Submitting pipeline jobs..."
 
 # Step 1: Validate manifests (needs GPU allocation even though not used)
 JOB1=$(sbatch --parsable << VALIDATE
