@@ -57,8 +57,11 @@ class ModelSelector:
         for task in self.tasks:
             results[task] = {}
 
+            # Map task to folder structure
+            task_folder = self.zero_shot_dir / task
+
             for model in self.all_models:
-                result_file = self.zero_shot_dir / task / model / "results.json"
+                result_file = task_folder / model / "results.json"
 
                 if not result_file.exists():
                     self.logger.warning(f"Missing results: {task}/{model}")

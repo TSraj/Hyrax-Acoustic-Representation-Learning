@@ -32,7 +32,7 @@ mkdir -p logs
 
 # Models to evaluate
 MODELS=("wav2vec2_base" "wav2vec2_base_960h" "hubert_base" "xls_r" "wavlm" "ecapa_tdnn")
-TASKS=("species_id" "hyrax_id")
+TASKS=("species_id" "hyrax_id" "hyrax_id_session_holdout")
 
 echo ""
 echo "========================================"
@@ -43,7 +43,11 @@ python scripts/phase3_02_create_manifests.py
 
 echo ""
 echo "========================================"
-echo "STEP 3: Zero-Shot Evaluation (All 6 Models × 2 Tasks = 12 runs)"
+echo "STEP 3: Zero-Shot Evaluation"
+echo "  - Species ID (8-class): 6 models"
+echo "  - Hyrax ID (18-class individual recognition): 6 models"
+echo "  - Session Holdout Diagnostic (4-class leakage test): 6 models"
+echo "  Total: 18 runs"
 echo "========================================"
 
 for task in "${TASKS[@]}"; do

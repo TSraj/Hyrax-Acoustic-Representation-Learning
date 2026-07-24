@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
 Phase 3 - Step 2: Create Manifests for Species ID and Hyrax ID
-Creates train/val/test splits (80/10/10) and manifests for both tasks.
+
+Creates:
+1. Species ID manifest (8 classes)
+2. Hyrax ID Option A: Per-individual 80/10/10 splits (all individuals ≥10 bouts)
+3. Hyrax ID Option C: Session-stratified splits (R3, Q7, P1, P8)
+4. Session profile log
 """
 
 import json
@@ -14,7 +19,7 @@ from collections import defaultdict
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.utils.logging_utils import setup_logger
-from src.utils.audio_utils import get_audio_info
+from src.utils.audio_utils import get_audio_info, load_audio, save_audio
 
 
 def load_hyrax_data(hyrax_dir):
@@ -323,10 +328,256 @@ def create_species_id_manifest(hyrax_data, train_ids, val_ids, test_ids,
     return manifest
 
 
+def parse_hyrax_id_labels(data_dir, logger):
+    """Parse GTLabels to extract bout info per individual from BIODA."""
+    logger.info("\nParsing GTLabels bout annotations...")
+
+    bouts_per_individual = defaultdict(list)
+    session_profile = defaultdict(lambda: defaultdict(int))
+
+    label_files = list(data_dir.glob("*/GTLabels/*.txt"))
+    logger.info(f"Found {len(label_files)} label files")
+
+    for label_file in sorted(label_files):
+        # Find corresponding BIODA denoised audio
+        bioda_dir = label_file.parent.parent / "BIODA" / "denoised"
+
+        # Match audio file (same base name without _labels suffix)
+        audio_name = label_file.stem.replace('_labels', '')
+        audio_file = bioda_dir / f"{audio_name}.wav"
+
+        if not audio_file.exists():
+            # Try without .txt extension variations
+            audio_matches = list(bioda_dir.glob(f"{audio_name}*.wav"))
+            if audio_matches:
+                audio_file = audio_matches[0]
+            else:
+                continue
+
+        # Extract individual and session from filename
+        filename = label_file.stem.replace('_labels', '')
+        parts = filename.split('_')
+        if len(parts) < 2:
+            continue
+
+        individual = parts[0]
+
+        # Extract session (date part - usually last or second to last)
+        session = parts[-1] if len(parts) >= 4 else parts[-1]
+
+        # Parse bouts from GTLabels (format: start end bout_X)
+        with open(label_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+
+                parts = line.split('\t')
+                if len(parts) < 3:
+                    continue
+
+                try:
+                    start = float(parts[0])
+                    end = float(parts[1])
+                    label = parts[2]
+
+                    # GTLabels use lowercase "bout_" prefix
+                    if not label.lower().startswith('bout_'):
+                        continue
+
+                    bouts_per_individual[individual].append({
+                        'audio_file': audio_file,
+                        'start': start,
+                        'end': end,
+                        'session': session
+                    })
+                    session_profile[individual][session] += 1
+
+                except (ValueError, IndexError):
+                    continue
+
+    logger.info(f"✓ Parsed bouts for {len(bouts_per_individual)} individuals")
+    for individual in sorted(bouts_per_individual.keys()):
+        logger.info(f"  {individual}: {len(bouts_per_individual[individual])} bouts")
+
+    return dict(bouts_per_individual), dict(session_profile)
+
+
+def concatenate_bouts(bout_list, target_sr=16000):
+    """Concatenate bout segments without silence."""
+    segments = []
+    for bout in bout_list:
+        try:
+            audio, sr = load_audio(str(bout['audio_file']), target_sr=target_sr, mono=True)
+            start_sample = int(bout['start'] * sr)
+            end_sample = int(bout['end'] * sr)
+            start_sample = max(0, start_sample)
+            end_sample = min(len(audio), end_sample)
+            segments.append(audio[start_sample:end_sample])
+        except Exception:
+            continue
+    return np.concatenate(segments) if segments else np.array([])
+
+
+def create_hyrax_id_manifest(bouts_per_individual, session_profile, output_dir, logger, min_bouts=10, seed=42):
+    """Hyrax ID: 18-class individual recognition with per-individual 80/10/10 bout splits."""
+    logger.info("\n" + "=" * 80)
+    logger.info("HYRAX ID: 18-class individual recognition")
+    logger.info("=" * 80)
+
+    np.random.seed(seed)
+
+    # Filter by min_bouts
+    included = [ind for ind, bouts in bouts_per_individual.items() if len(bouts) >= min_bouts]
+    excluded = [(ind, len(bouts)) for ind, bouts in bouts_per_individual.items() if len(bouts) < min_bouts]
+
+    logger.info(f"\nIncluded: {len(included)} individuals (≥{min_bouts} bouts)")
+    if excluded:
+        logger.info(f"Excluded: {len(excluded)} individuals (<{min_bouts} bouts)")
+        for ind, count in sorted(excluded):
+            logger.info(f"  {ind}: {count} bouts")
+
+    # Create concatenated files per split
+    concat_dir = output_dir / "hyrax_id_concatenated"
+    concat_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_splits = {'train': [], 'val': [], 'test': []}
+
+    for individual in sorted(included):
+        bouts = bouts_per_individual[individual]
+        n_bouts = len(bouts)
+
+        logger.info(f"\nProcessing {individual}: {n_bouts} bouts")
+
+        indices = np.random.permutation(n_bouts)
+        n_train = int(0.8 * n_bouts)
+        n_val = max(1, int(0.1 * n_bouts))
+        n_test = n_bouts - n_train - n_val
+        if n_test < 1:
+            n_train, n_val, n_test = n_bouts - 2, 1, 1
+
+        splits_indices = {
+            'train': indices[:n_train],
+            'val': indices[n_train:n_train + n_val],
+            'test': indices[n_train + n_val:]
+        }
+
+        for split_name, split_idx in splits_indices.items():
+            bout_list = [bouts[i] for i in split_idx]
+            concat_file = concat_dir / f"{individual}_{split_name}.wav"
+
+            logger.info(f"  {split_name}: Concatenating {len(bout_list)} bouts...")
+            # Concatenate and save
+            audio = concatenate_bouts(bout_list)
+            if len(audio) > 0:
+                save_audio(str(concat_file), audio, sr=16000)
+                logger.info(f"  {split_name}: Saved {concat_file.name} ({len(audio)/16000:.2f}s)")
+
+            manifest_splits[split_name].append({
+                'file': str(concat_file),
+                'individual': individual,
+                'num_bouts': len(bout_list),
+                'duration': len(audio) / 16000
+            })
+
+    manifest = {
+        'task': 'hyrax_id',
+        'description': f'18-class hyrax individual recognition - all individuals ≥{min_bouts} bouts, per-individual 80/10/10 bout splits',
+        'num_classes': len(included),
+        'individuals': sorted(included),
+        'excluded': [{'individual': ind, 'bout_count': cnt} for ind, cnt in sorted(excluded)],
+        'class_to_idx': {ind: idx for idx, ind in enumerate(sorted(included))},
+        'class_weights': {ind: 1.0 for ind in included},
+        'splits': manifest_splits,
+        'split_counts': {k: len(v) for k, v in manifest_splits.items()},
+        'seed': seed
+    }
+
+    manifest_file = output_dir / "hyrax_id.json"
+    with open(manifest_file, 'w') as f:
+        json.dump(manifest, f, indent=2)
+
+    logger.info(f"\n✓ Hyrax ID manifest: {manifest_file}")
+    logger.info(f"  Classes: {len(included)} | Train: {len(manifest_splits['train'])} | Val: {len(manifest_splits['val'])} | Test: {len(manifest_splits['test'])}")
+
+    return manifest
+
+
+def create_session_holdout_manifest(bouts_per_individual, session_profile, output_dir, logger, seed=42):
+    """Session holdout diagnostic: Session-stratified split for R3, Q7, P1, P8 to test for recording leakage."""
+    logger.info("\n" + "=" * 80)
+    logger.info("HYRAX ID - SESSION HOLDOUT DIAGNOSTIC")
+    logger.info("Session-stratified splits for leakage sensitivity test (R3, Q7, P1, P8)")
+    logger.info("=" * 80)
+
+    np.random.seed(seed)
+
+    target = ['R3', 'Q7', 'P1', 'P8']
+
+    # Select held-out session per individual (mid/large session)
+    held_out = {}
+    for ind in target:
+        if ind not in session_profile:
+            continue
+        sessions = sorted(session_profile[ind].items(), key=lambda x: x[1], reverse=True)
+        held_out[ind] = sessions[1][0] if len(sessions) > 1 else sessions[0][0]
+
+    concat_dir = output_dir / "session_holdout_concatenated"
+    concat_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_splits = {'train': [], 'test': []}
+
+    for ind in target:
+        if ind not in bouts_per_individual:
+            continue
+
+        train_bouts = [b for b in bouts_per_individual[ind] if b['session'] != held_out[ind]]
+        test_bouts = [b for b in bouts_per_individual[ind] if b['session'] == held_out[ind]]
+
+        logger.info(f"\n{ind}: Held-out session={held_out[ind]} | Train={len(train_bouts)} | Test={len(test_bouts)}")
+
+        for split_name, bout_list in [('train', train_bouts), ('test', test_bouts)]:
+            if not bout_list:
+                continue
+
+            concat_file = concat_dir / f"{ind}_{split_name}.wav"
+            audio = concatenate_bouts(bout_list)
+            if len(audio) > 0:
+                save_audio(str(concat_file), audio, sr=16000)
+
+            manifest_splits[split_name].append({
+                'file': str(concat_file),
+                'individual': ind,
+                'num_bouts': len(bout_list),
+                'duration': len(audio) / 16000,
+                'held_out_session': held_out[ind] if split_name == 'test' else None
+            })
+
+    manifest = {
+        'task': 'hyrax_id_session_holdout',
+        'description': 'Session holdout diagnostic - 4 individuals with held-out sessions to test for recording leakage',
+        'num_classes': len(target),
+        'individuals': sorted(target),
+        'class_to_idx': {ind: idx for idx, ind in enumerate(sorted(target))},
+        'held_out_sessions': held_out,
+        'splits': manifest_splits,
+        'split_counts': {k: len(v) for k, v in manifest_splits.items()},
+        'seed': seed
+    }
+
+    manifest_file = output_dir / "hyrax_id_session_holdout.json"
+    with open(manifest_file, 'w') as f:
+        json.dump(manifest, f, indent=2)
+
+    logger.info(f"\n✓ Session holdout manifest: {manifest_file}")
+    logger.info(f"  Classes: {len(target)} | Train: {len(manifest_splits['train'])} | Test: {len(manifest_splits['test'])}")
+
+    return manifest
+
+
 def main():
     """Main pipeline."""
 
-    # Setup logging
     log_dir = Path("outputs/phase3/logs")
     log_dir.mkdir(parents=True, exist_ok=True)
     logger = setup_logger("Phase3_Manifests", log_file=str(log_dir / "manifest_creation.log"))
@@ -336,30 +587,28 @@ def main():
     logger.info("=" * 80)
 
     # Paths
+    data_dir = Path("Data/YearLocation")
     hyrax_dir = Path("outputs/phase3/hyrax_data")
     phase2_manifests_dir = Path("outputs/phase2/manifests")
     output_dir = Path("outputs/phase3/manifests")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load hyrax data
-    logger.info("\nLoading extracted hyrax data...")
+    # Parse Hyrax-ID bout labels
+    bouts_per_individual, session_profile = parse_hyrax_id_labels(data_dir, logger)
+
+    # Save session profile
+    profile = {'individuals': {ind: {'total_bouts': sum(sessions.values()), 'sessions': dict(sessions)}
+                                for ind, sessions in session_profile.items()}}
+    with open(output_dir / "hyrax_session_profile.json", 'w') as f:
+        json.dump(profile, f, indent=2)
+
+    # Create Hyrax ID manifests
+    hyrax_id_manifest = create_hyrax_id_manifest(bouts_per_individual, session_profile, output_dir, logger)
+    session_holdout_manifest = create_session_holdout_manifest(bouts_per_individual, session_profile, output_dir, logger)
+
+    # Load old concatenated hyrax data for species_id
     hyrax_data = load_hyrax_data(hyrax_dir)
-
-    logger.info(f"✓ Loaded {len(hyrax_data)} individuals")
-
-    # Split individuals (80/10/10)
-    logger.info("\nSplitting individuals (80% train / 10% val / 10% test)...")
     train_ids, val_ids, test_ids = split_individuals(list(hyrax_data.keys()))
-
-    logger.info(f"\nSplit sizes:")
-    logger.info(f"  Train: {len(train_ids)} individuals - {train_ids}")
-    logger.info(f"  Val:   {len(val_ids)} individuals - {val_ids}")
-    logger.info(f"  Test:  {len(test_ids)} individuals - {test_ids}")
-
-    # Create Hyrax ID manifest
-    hyrax_id_manifest = create_hyrax_id_manifest(
-        hyrax_data, train_ids, val_ids, test_ids, output_dir, logger
-    )
 
     # Create Species ID manifest
     species_id_manifest = create_species_id_manifest(
@@ -371,10 +620,12 @@ def main():
     logger.info("\n" + "=" * 80)
     logger.info("MANIFEST CREATION COMPLETE")
     logger.info("=" * 80)
-    logger.info(f"\nOutput directory: {output_dir}")
-    logger.info(f"  - hyrax_id_manifest.json (18-class individual ID)")
-    logger.info(f"  - species_id_manifest.json (8-class species ID)")
-    logger.info("\n✓ Ready for Phase 3 experiments!")
+    logger.info(f"\nOutput: {output_dir}")
+    logger.info(f"  - hyrax_session_profile.json")
+    logger.info(f"  - hyrax_id.json ({hyrax_id_manifest['num_classes']} classes - MAIN TASK)")
+    logger.info(f"  - hyrax_id_session_holdout.json ({session_holdout_manifest['num_classes']} classes - DIAGNOSTIC)")
+    logger.info(f"  - species_id_manifest.json (8 classes)")
+    logger.info("\n✓ Ready for experiments!")
 
 
 if __name__ == "__main__":

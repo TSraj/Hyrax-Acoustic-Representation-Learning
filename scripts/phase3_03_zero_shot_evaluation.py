@@ -629,7 +629,7 @@ def main():
                        choices=["wav2vec2_base", "wav2vec2_base_960h", "hubert_base",
                                "xls_r", "wavlm", "ecapa_tdnn"])
     parser.add_argument("--task", required=True,
-                       choices=["species_id", "hyrax_id"])
+                       choices=["species_id", "hyrax_id", "hyrax_id_session_holdout"])
     parser.add_argument("--debug", action="store_true", help="Debug mode: small subset")
     args = parser.parse_args()
 
@@ -641,16 +641,24 @@ def main():
         log_file=str(log_dir / f"zero_shot_{args.task}_{args.model}.log")
     )
 
-    # Paths
-    manifest_path = Path(f"outputs/phase3/manifests/{args.task}_manifest.json")
-    output_dir = Path(f"outputs/phase3/zero_shot/{args.task}/{args.model}")
+    # Paths - use new manifest naming
+    manifest_path = Path(f"outputs/phase3/manifests/{args.task}.json")
+
+    # Map task to output subfolder
+    if args.task == "hyrax_id_session_holdout":
+        output_dir = Path(f"outputs/phase3/zero_shot/hyrax_id/session_holdout/{args.model}")
+    else:
+        output_dir = Path(f"outputs/phase3/zero_shot/{args.task}/{args.model}")
 
     # Load config (minimal)
     config = {}
 
+    # Determine actual task type for evaluator (hyrax_id or species_id)
+    eval_task = "hyrax_id" if "hyrax_id" in args.task else args.task
+
     # Run evaluation
     evaluator = ZeroShotEvaluator(
-        config, args.model, args.task, manifest_path, output_dir, logger, debug=args.debug
+        config, args.model, eval_task, manifest_path, output_dir, logger, debug=args.debug
     )
 
     evaluator.run()
