@@ -250,15 +250,20 @@ class ZeroShotEvaluator:
         # Convert to tensors
         train_X = torch.FloatTensor(train_embeddings).to(self.device)
         train_y = torch.LongTensor(train_labels).to(self.device)
-        val_X = torch.FloatTensor(val_embeddings).to(self.device)
-        val_y = torch.LongTensor(val_labels).to(self.device)
+
+        # Check if validation set exists
+        has_val = val_embeddings is not None and val_labels is not None
+
+        if has_val:
+            val_X = torch.FloatTensor(val_embeddings).to(self.device)
+            val_y = torch.LongTensor(val_labels).to(self.device)
 
         # Training loop
         best_val_acc = 0
         best_state = classifier.state_dict()  # Initialize with initial state
         patience = 10
         patience_counter = 0
-        max_epochs = 100
+        max_epochs = 100 if has_val else 50  # Fewer epochs without validation
 
         for epoch in range(max_epochs):
             classifier.train()
@@ -272,26 +277,32 @@ class ZeroShotEvaluator:
             loss.backward()
             optimizer.step()
 
-            # Validation
-            classifier.eval()
-            with torch.no_grad():
-                val_outputs = classifier(val_X)
-                val_preds = val_outputs.argmax(dim=1)
-                val_acc = (val_preds == val_y).float().mean().item()
+            # Validation (if available)
+            if has_val:
+                classifier.eval()
+                with torch.no_grad():
+                    val_outputs = classifier(val_X)
+                    val_preds = val_outputs.argmax(dim=1)
+                    val_acc = (val_preds == val_y).float().mean().item()
 
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-                best_state = classifier.state_dict()
-                patience_counter = 0
+                if val_acc > best_val_acc:
+                    best_val_acc = val_acc
+                    best_state = classifier.state_dict()
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+
+                if (epoch + 1) % 10 == 0:
+                    self.logger.info(f"Epoch {epoch+1}: Loss={loss.item():.4f}, Val Acc={val_acc:.4f}")
+
+                if patience_counter >= patience:
+                    self.logger.info(f"Early stopping at epoch {epoch+1}")
+                    break
             else:
-                patience_counter += 1
-
-            if (epoch + 1) % 10 == 0:
-                self.logger.info(f"Epoch {epoch+1}: Loss={loss.item():.4f}, Val Acc={val_acc:.4f}")
-
-            if patience_counter >= patience:
-                self.logger.info(f"Early stopping at epoch {epoch+1}")
-                break
+                # No validation - just save final state
+                best_state = classifier.state_dict()
+                if (epoch + 1) % 10 == 0:
+                    self.logger.info(f"Epoch {epoch+1}: Loss={loss.item():.4f}")
 
         # Load best model
         classifier.load_state_dict(best_state)
@@ -458,12 +469,13 @@ class ZeroShotEvaluator:
             for metric, value in test_metrics.items():
                 f.write(f"{metric:30s}: {value:.4f}\n")
 
-            f.write("\n" + "=" * 80 + "\n")
-            f.write("VALIDATION METRICS\n")
-            f.write("=" * 80 + "\n\n")
+            if val_metrics is not None:
+                f.write("\n" + "=" * 80 + "\n")
+                f.write("VALIDATION METRICS\n")
+                f.write("=" * 80 + "\n\n")
 
-            for metric, value in val_metrics.items():
-                f.write(f"{metric:30s}: {value:.4f}\n")
+                for metric, value in val_metrics.items():
+                    f.write(f"{metric:30s}: {value:.4f}\n")
 
         self.logger.info(f"✓ Summary report saved: {report_file}")
 
@@ -587,12 +599,21 @@ class ZeroShotEvaluator:
 
         # Extract embeddings
         train_emb, train_labels = self.extract_embeddings_for_split('train')
-        val_emb, val_labels = self.extract_embeddings_for_split('val')
+
+        # Check if val split exists (session_holdout has only train/test)
+        if 'val' in self.manifest['splits']:
+            val_emb, val_labels = self.extract_embeddings_for_split('val')
+            has_val = True
+        else:
+            val_emb, val_labels = None, None
+            has_val = False
+
         test_emb, test_labels = self.extract_embeddings_for_split('test')
 
         self.logger.info(f"\nEmbedding shapes:")
         self.logger.info(f"  Train: {train_emb.shape}")
-        self.logger.info(f"  Val: {val_emb.shape}")
+        if has_val:
+            self.logger.info(f"  Val: {val_emb.shape}")
         self.logger.info(f"  Test: {test_emb.shape}")
 
         # Train classifier
@@ -604,13 +625,19 @@ class ZeroShotEvaluator:
         self.logger.info("=" * 80)
 
         train_metrics, _, _, _, _ = self.evaluate_classifier(classifier, train_emb, train_labels)
-        val_metrics, _, _, _, _ = self.evaluate_classifier(classifier, val_emb, val_labels)
+
+        if has_val:
+            val_metrics, _, _, _, _ = self.evaluate_classifier(classifier, val_emb, val_labels)
+        else:
+            val_metrics = None
+
         test_metrics, test_cm, test_per_class, test_preds, test_proba = self.evaluate_classifier(
             classifier, test_emb, test_labels
         )
 
         self.logger.info(f"\nTrain Accuracy: {train_metrics['accuracy']:.4f}")
-        self.logger.info(f"Val Accuracy:   {val_metrics['accuracy']:.4f}")
+        if has_val:
+            self.logger.info(f"Val Accuracy:   {val_metrics['accuracy']:.4f}")
         self.logger.info(f"Test Accuracy:  {test_metrics['accuracy']:.4f}")
 
         # Save all results
