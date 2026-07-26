@@ -3,7 +3,7 @@
 #SBATCH --partition=v100
 #SBATCH --gres=gpu:v100:1
 #SBATCH --cpus-per-task=2
-#SBATCH --time=15:00:00
+#SBATCH --time=24:00:00
 #SBATCH --output=logs/phase3_part2_%j.out
 #SBATCH --error=logs/phase3_part2_%j.err
 

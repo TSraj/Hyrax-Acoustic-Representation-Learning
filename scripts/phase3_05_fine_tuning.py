@@ -232,17 +232,34 @@ class FineTuner:
         """
         self.logger.info(f"\nFine-tuning with {len(train_items)} train / {len(val_items)} val samples...")
 
-        # Unfreeze model for fine-tuning
+        # Freeze all layers first, then unfreeze first 4 layers only (like Phase 2)
         if self.model_type == "transformer":
             self.model.train()
+
+            # Freeze all parameters first
             for param in self.model.parameters():
-                param.requires_grad = True
+                param.requires_grad = False
+
+            # Unfreeze first 4 transformer layers only
+            num_layers = len(self.model.encoder.layers)
+            self.logger.info(f"Total transformer layers: {num_layers}")
+            self.logger.info(f"Fine-tuning first 4 layers, freezing remaining {num_layers - 4} layers")
+
+            for i in range(min(4, num_layers)):
+                for param in self.model.encoder.layers[i].parameters():
+                    param.requires_grad = True
 
         self.classifier.train()
 
+        # Collect trainable params
+        trainable_params = []
+        if self.model_type == "transformer":
+            for i in range(min(4, num_layers)):
+                trainable_params.extend(self.model.encoder.layers[i].parameters())
+
         # Optimizer with different LRs for encoder and classifier
         optimizer = optim.AdamW([
-            {'params': self.model.parameters() if self.model_type == "transformer" else [], 'lr': 1e-5},
+            {'params': trainable_params if self.model_type == "transformer" else [], 'lr': 1e-5},
             {'params': self.classifier.parameters(), 'lr': 1e-3}
         ])
 
