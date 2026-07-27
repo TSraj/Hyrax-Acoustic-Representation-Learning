@@ -166,6 +166,10 @@ class ZeroShotEvaluator:
         if len(audio) > max_samples:
             audio = audio[:max_samples]
 
+        return self.extract_embedding_from_audio(audio)
+
+    def extract_embedding_from_audio(self, audio):
+        """Extract embedding from audio array (use last layer)."""
         # Extract embedding
         if self.model_type == "transformer":
             inputs = self.feature_extractor(
@@ -206,7 +210,15 @@ class ZeroShotEvaluator:
         embeddings = []
         labels = []
 
-        self.logger.info(f"\nExtracting embeddings for {split_name} split ({len(items)} files)...")
+        # For hyrax_id tasks, use windowing to increase N
+        use_windowing = self.task in ['hyrax_id', 'hyrax_id_session_holdout']
+        window_size = 5.0  # 5 seconds
+        window_stride = 2.5  # 50% overlap
+
+        if use_windowing:
+            self.logger.info(f"\nExtracting embeddings for {split_name} split ({len(items)} files) with {window_size}s windows...")
+        else:
+            self.logger.info(f"\nExtracting embeddings for {split_name} split ({len(items)} files)...")
 
         for item in tqdm(items, desc=f"{split_name}"):
             try:
@@ -217,20 +229,48 @@ class ZeroShotEvaluator:
                     # Phase 2 files are in data/ folder
                     file_path = f"Data/{file_path}"
 
-                embedding = self.extract_embedding(file_path)
-
                 # Get label
-                if self.task == 'hyrax_id':
+                if self.task in ['hyrax_id', 'hyrax_id_session_holdout']:
                     label = self.class_to_idx[item['individual']]
                 else:  # species_id
                     label = self.class_to_idx[item['species']]
 
-                embeddings.append(embedding)
-                labels.append(label)
+                if use_windowing:
+                    # Load full audio and window it
+                    audio, sr = load_audio(str(file_path), target_sr=16000, mono=True)
+
+                    window_samples = int(window_size * sr)
+                    stride_samples = int(window_stride * sr)
+
+                    # Extract windows
+                    num_windows = 0
+                    for start in range(0, len(audio) - window_samples + 1, stride_samples):
+                        end = start + window_samples
+                        window_audio = audio[start:end]
+
+                        # Extract embedding for this window
+                        embedding = self.extract_embedding_from_audio(window_audio)
+                        embeddings.append(embedding)
+                        labels.append(label)
+                        num_windows += 1
+
+                    # If audio too short for even one window, use the whole thing
+                    if num_windows == 0:
+                        embedding = self.extract_embedding(file_path)
+                        embeddings.append(embedding)
+                        labels.append(label)
+                else:
+                    # No windowing - one embedding per file
+                    embedding = self.extract_embedding(file_path)
+                    embeddings.append(embedding)
+                    labels.append(label)
 
             except Exception as e:
                 self.logger.warning(f"Failed to extract {item['file']}: {e}")
                 continue
+
+        if use_windowing:
+            self.logger.info(f"  Total windows extracted: {len(embeddings)}")
 
         return np.array(embeddings), np.array(labels)
 
