@@ -419,23 +419,39 @@ def create_hyrax_id_manifest(bouts_per_individual, session_profile, output_dir, 
 
 
 def create_session_holdout_manifest(bouts_per_individual, session_profile, output_dir, logger, seed=42):
-    """Session holdout diagnostic: Session-stratified split for R3, Q7, P1, P8 to test for recording leakage."""
+    """Session holdout diagnostic: Session-stratified split for 8 individuals with ≥4 sessions and ≥100 bouts."""
     logger.info("\n" + "=" * 80)
     logger.info("HYRAX ID - SESSION HOLDOUT DIAGNOSTIC")
-    logger.info("Session-stratified splits for leakage sensitivity test (R3, Q7, P1, P8)")
+    logger.info("Session-stratified splits for leakage sensitivity test")
+    logger.info("Inclusion criteria: ≥4 sessions, ≥100 bouts, clean date labels")
     logger.info("=" * 80)
 
     np.random.seed(seed)
 
-    target = ['R3', 'Q7', 'P1', 'P8']
+    # 8 individuals meeting criteria (≥4 sessions, ≥100 bouts with clean date labels)
+    target = ['R3', 'Q7', 'P1', 'P8', 'O7', 'M9', 'U7', 'Kashtan']
 
-    # Select held-out session per individual (mid/large session)
+    # Junk sessions to exclude (non-date labels)
+    junk_sessions = {
+        'P8': ['1301'],          # Location code
+        'Kashtan': ['7893', 'maybeKashtan']  # Location code + ambiguous label
+    }
+
+    # Select held-out session per individual (largest valid session)
     held_out = {}
     for ind in target:
         if ind not in session_profile:
             continue
-        sessions = sorted(session_profile[ind].items(), key=lambda x: x[1], reverse=True)
-        held_out[ind] = sessions[1][0] if len(sessions) > 1 else sessions[0][0]
+
+        # Filter out junk sessions
+        valid_sessions = {s: c for s, c in session_profile[ind].items()
+                          if s not in junk_sessions.get(ind, [])}
+
+        # Sort by bout count, pick largest
+        sessions = sorted(valid_sessions.items(), key=lambda x: x[1], reverse=True)
+        held_out[ind] = sessions[0][0] if sessions else None
+
+        logger.info(f"{ind}: {len(valid_sessions)} valid sessions (excluded {len(session_profile[ind]) - len(valid_sessions)} junk)")
 
     concat_dir = output_dir / "session_holdout_concatenated"
     concat_dir.mkdir(parents=True, exist_ok=True)
@@ -443,11 +459,15 @@ def create_session_holdout_manifest(bouts_per_individual, session_profile, outpu
     manifest_splits = {'train': [], 'test': []}
 
     for ind in target:
-        if ind not in bouts_per_individual:
+        if ind not in bouts_per_individual or held_out[ind] is None:
             continue
 
-        train_bouts = [b for b in bouts_per_individual[ind] if b['session'] != held_out[ind]]
-        test_bouts = [b for b in bouts_per_individual[ind] if b['session'] == held_out[ind]]
+        # Filter bouts: exclude junk sessions AND separate held-out
+        valid_bouts = [b for b in bouts_per_individual[ind]
+                       if b['session'] not in junk_sessions.get(ind, [])]
+
+        train_bouts = [b for b in valid_bouts if b['session'] != held_out[ind]]
+        test_bouts = [b for b in valid_bouts if b['session'] == held_out[ind]]
 
         logger.info(f"\n{ind}: Held-out session={held_out[ind]} | Train={len(train_bouts)} | Test={len(test_bouts)}")
 
@@ -479,12 +499,14 @@ def create_session_holdout_manifest(bouts_per_individual, session_profile, outpu
 
     manifest = {
         'task': 'hyrax_id_session_holdout',
-        'description': 'Session holdout diagnostic - 4 individuals with held-out sessions to test for recording leakage',
+        'description': 'Session holdout diagnostic - 8 individuals (≥4 sessions, ≥100 bouts, clean date labels)',
+        'inclusion_criteria': '≥4 sessions AND ≥100 bouts with clean date labels',
         'num_classes': len(target),
         'individuals': sorted(target),
         'class_to_idx': {ind: idx for idx, ind in enumerate(sorted(target))},
         'class_weights': class_weights,
         'held_out_sessions': held_out,
+        'excluded_sessions': junk_sessions,
         'splits': manifest_splits,
         'split_counts': {k: len(v) for k, v in manifest_splits.items()},
         'seed': seed
