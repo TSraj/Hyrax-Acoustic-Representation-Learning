@@ -12,6 +12,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import LambdaLR
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -232,7 +233,7 @@ class FineTuner:
         """
         self.logger.info(f"\nFine-tuning with {len(train_items)} train / {len(val_items)} val samples...")
 
-        # Freeze all layers first, then unfreeze first 4 layers only (like Phase 2)
+        # Freeze all layers first, then unfreeze LAST 4 layers (prevents catastrophic forgetting)
         if self.model_type == "transformer":
             self.model.train()
 
@@ -240,12 +241,13 @@ class FineTuner:
             for param in self.model.parameters():
                 param.requires_grad = False
 
-            # Unfreeze first 4 transformer layers only
+            # Unfreeze LAST 4 transformer layers (where task-specific features form)
             num_layers = len(self.model.encoder.layers)
             self.logger.info(f"Total transformer layers: {num_layers}")
-            self.logger.info(f"Fine-tuning first 4 layers, freezing remaining {num_layers - 4} layers")
+            self.logger.info(f"Fine-tuning LAST 4 layers (layers {num_layers-4} to {num_layers-1})")
+            self.logger.info(f"Freezing first {num_layers - 4} layers to preserve pretrained knowledge")
 
-            for i in range(min(4, num_layers)):
+            for i in range(max(0, num_layers - 4), num_layers):
                 for param in self.model.encoder.layers[i].parameters():
                     param.requires_grad = True
 
@@ -254,7 +256,7 @@ class FineTuner:
         # Collect trainable params
         trainable_params = []
         if self.model_type == "transformer":
-            for i in range(min(4, num_layers)):
+            for i in range(max(0, num_layers - 4), num_layers):
                 trainable_params.extend(self.model.encoder.layers[i].parameters())
 
         # Optimizer with different LRs for encoder and classifier
@@ -271,6 +273,23 @@ class FineTuner:
         patience = 2 if self.debug else 10
         best_val_acc = 0
         patience_counter = 0
+
+        # Warmup scheduler (10% of total steps)
+        steps_per_epoch = len(train_items)
+        total_steps = max_epochs * steps_per_epoch
+        warmup_steps = int(0.1 * total_steps)
+
+        def lr_lambda(current_step):
+            if current_step < warmup_steps:
+                # Linear warmup: 0 -> 1
+                return float(current_step) / float(max(1, warmup_steps))
+            else:
+                # Constant LR after warmup
+                return 1.0
+
+        scheduler = LambdaLR(optimizer, lr_lambda)
+
+        self.logger.info(f"Warmup scheduler: {warmup_steps} steps ({warmup_steps/total_steps*100:.1f}% of training)")
 
         history = {
             'train_loss': [],
@@ -310,6 +329,7 @@ class FineTuner:
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
+                    scheduler.step()  # Step-based warmup
 
                     # Track metrics
                     train_losses.append(loss.item())
