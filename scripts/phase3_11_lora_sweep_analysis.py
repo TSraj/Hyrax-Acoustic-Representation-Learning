@@ -66,69 +66,119 @@ def zero_shot_baseline(task, model):
 
 
 def collect(sweep_root, logger):
-    rows, missing = [], []
+    """Read every run, across both directory layouts.
+
+    Single-seed runs live at   <task>/<model>/frac<NN>/lora_fine_tuning_results.json
+    multi-seed runs at         <task>/<model>/frac<NN>/seed<S>/lora_fine_tuning_results.json
+
+    The seed is taken from each file's own config rather than from the path, so
+    both layouts are handled identically.
+    """
+    rows, empty = [], []
 
     for task in TASKS:
         for model in MODELS:
             for frac in FRACTIONS:
-                path = (Path(sweep_root) / task / model / f"frac{frac}" /
-                        "lora_fine_tuning_results.json")
-                if not path.exists():
-                    missing.append(f"{task}/{model}/frac{frac}")
+                frac_dir = Path(sweep_root) / task / model / f"frac{frac}"
+                paths = sorted(frac_dir.glob("lora_fine_tuning_results.json")) + \
+                        sorted(frac_dir.glob("seed*/lora_fine_tuning_results.json"))
+                if not paths:
+                    empty.append(f"{task}/{model}/frac{frac}")
                     continue
 
-                with open(path) as f:
-                    r = json.load(f)
+                for path in paths:
+                    with open(path) as f:
+                        r = json.load(f)
 
-                test = r.get('test_metrics', {})
-                val = r.get('val_metrics', {})
-                hist = r.get('history', {})
-                rows.append({
-                    'task': task,
-                    'model': model,
-                    'fraction': frac,
-                    'test_accuracy': test.get('accuracy'),
-                    'test_f1_macro': test.get('f1_macro'),
-                    'test_balanced_accuracy': test.get('balanced_accuracy'),
-                    'val_accuracy': val.get('accuracy'),
-                    'val_f1_macro': val.get('f1_macro'),
-                    'best_val_f1_macro': r.get('best_val_f1_macro'),
-                    'best_epoch': r.get('best_epoch'),
-                    'epochs_run': len(hist.get('train_acc', [])),
-                    'final_train_acc': (hist.get('train_acc') or [None])[-1],
-                })
+                    test = r.get('test_metrics', {})
+                    val = r.get('val_metrics', {})
+                    hist = r.get('history', {})
+                    rows.append({
+                        'task': task,
+                        'model': model,
+                        'fraction': frac,
+                        'seed': r.get('config', {}).get('seed'),
+                        'test_accuracy': test.get('accuracy'),
+                        'test_f1_macro': test.get('f1_macro'),
+                        'test_balanced_accuracy': test.get('balanced_accuracy'),
+                        'val_accuracy': val.get('accuracy'),
+                        'val_f1_macro': val.get('f1_macro'),
+                        'best_val_f1_macro': r.get('best_val_f1_macro'),
+                        'best_epoch': r.get('best_epoch'),
+                        'epochs_run': len(hist.get('train_acc', [])),
+                        'final_train_acc': (hist.get('train_acc') or [None])[-1],
+                        'path': str(path),
+                    })
 
     df = pd.DataFrame(rows)
+    if df.empty:
+        return df, df, empty
 
-    logger.info(f"\nCollected {len(df)} / {len(TASKS)*len(MODELS)*len(FRACTIONS)} runs")
-    if missing:
-        logger.warning(f"Missing or not yet finished ({len(missing)}):")
-        for m in missing:
+    dupes = df[df.duplicated(subset=['task', 'model', 'fraction', 'seed'], keep=False)]
+    if not dupes.empty:
+        logger.warning("Duplicate (task, model, fraction, seed) entries found:")
+        for _, d in dupes.iterrows():
+            logger.warning(f"  seed {d['seed']}: {d['path']}")
+
+    # Aggregate across seeds
+    agg = (df.groupby(['task', 'model', 'fraction'])
+             .agg(n_seeds=('seed', 'nunique'),
+                  seeds=('seed', lambda s: sorted(v for v in s.unique() if v is not None)),
+                  f1_mean=('test_f1_macro', 'mean'),
+                  f1_std=('test_f1_macro', lambda s: s.std(ddof=1) if len(s) > 1 else 0.0),
+                  f1_min=('test_f1_macro', 'min'),
+                  f1_max=('test_f1_macro', 'max'),
+                  acc_mean=('test_accuracy', 'mean'),
+                  acc_std=('test_accuracy', lambda s: s.std(ddof=1) if len(s) > 1 else 0.0),
+                  train_acc_mean=('final_train_acc', 'mean'))
+             .reset_index())
+
+    logger.info(f"\nCollected {len(df)} runs across "
+                f"{len(agg)} (task, model, fraction) cells")
+    for task in TASKS:
+        sub = agg[agg['task'] == task]
+        if not sub.empty:
+            counts = sorted(sub['n_seeds'].unique())
+            logger.info(f"  {task}: seeds per cell = {counts}")
+    if empty:
+        logger.warning(f"Cells with no runs ({len(empty)}):")
+        for m in empty:
             logger.warning(f"  {m}")
 
-    return df, missing
+    return df, agg, empty
 
 
-def plot_curves(df, out_dir, logger):
-    """2 rows (macro-F1, accuracy) x 2 cols (tasks)."""
-    metrics = [("test_f1_macro", "Test macro-F1", "f1_macro"),
-               ("test_accuracy", "Test accuracy", "accuracy")]
+def plot_curves(agg, out_dir, logger):
+    """2 rows (macro-F1, accuracy) x 2 cols (tasks), mean +/- std across seeds."""
+    metrics = [("f1_mean", "f1_std", "Test macro-F1", "f1_macro"),
+               ("acc_mean", "acc_std", "Test accuracy", "accuracy")]
 
     fig, axes = plt.subplots(2, 2, figsize=(12.5, 9))
 
-    for r, (col, ylabel, base_key) in enumerate(metrics):
+    for r, (mcol, scol, ylabel, base_key) in enumerate(metrics):
         for c, task in enumerate(TASKS):
             ax = axes[r][c]
 
             series = {}
+            multi_seed = False
             for model in MODELS:
-                sub = df[(df['task'] == task) & (df['model'] == model)].sort_values('fraction')
-                sub = sub.dropna(subset=[col])
+                sub = agg[(agg['task'] == task) & (agg['model'] == model)].sort_values('fraction')
+                sub = sub.dropna(subset=[mcol])
                 if not sub.empty:
-                    series[model] = dict(zip(sub['fraction'], sub[col]))
-                    ax.plot(sub['fraction'], sub[col], marker='o', linewidth=2,
+                    series[model] = dict(zip(sub['fraction'], sub[mcol]))
+                    n_max = int(sub['n_seeds'].max())
+                    label = (f"{MODEL_LABELS[model]} (n={n_max} seeds)" if n_max > 1
+                             else MODEL_LABELS[model])
+                    ax.plot(sub['fraction'], sub[mcol], marker='o', linewidth=2,
                             markersize=7, color=MODEL_COLORS[model],
-                            label=MODEL_LABELS[model], zorder=3)
+                            label=label, zorder=3)
+                    if (sub['n_seeds'] > 1).any():
+                        multi_seed = True
+                        ax.fill_between(sub['fraction'],
+                                        sub[mcol] - sub[scol],
+                                        sub[mcol] + sub[scol],
+                                        color=MODEL_COLORS[model], alpha=0.18,
+                                        linewidth=0, zorder=1)
 
                 base = zero_shot_baseline(task, model)
                 if base is not None:
@@ -165,16 +215,20 @@ def plot_curves(df, out_dir, logger):
             # Headroom so value labels on points near 1.0 stay inside the axes
             ax.set_ylim(0, 1.14)
             ax.grid(alpha=0.3)
+            # 'best' keeps the box off the curves and off the chance label,
+            # whose position varies a lot between the two tasks.
+            ax.legend(fontsize=8, loc='best', framealpha=0.9)
             if r == 0:
-                ax.set_title(TASK_LABELS[task], fontsize=12)
+                title = TASK_LABELS[task]
+                if multi_seed:
+                    title += "  (shaded: ±1 SD across seeds)"
+                ax.set_title(title, fontsize=11)
 
-    # One legend for the whole figure, including the baseline line style
-    handles, labels = axes[0][0].get_legend_handles_labels()
     baseline_proxy = plt.Line2D([], [], color='grey', linestyle='--',
                                 label='zero-shot baseline (frozen encoder)')
-    fig.legend(handles=handles + [baseline_proxy],
-               labels=labels + ['zero-shot baseline (frozen encoder)'],
-               loc='lower center', ncol=3, fontsize=9,
+    fig.legend(handles=[baseline_proxy],
+               labels=['zero-shot baseline (frozen encoder)'],
+               loc='lower center', ncol=1, fontsize=9,
                bbox_to_anchor=(0.5, -0.01), frameon=False)
 
     fig.suptitle("LoRA fine-tuning data efficiency", fontsize=14)
@@ -186,76 +240,91 @@ def plot_curves(df, out_dir, logger):
     logger.info(f"✓ Curves saved: {out}")
 
 
-def write_tables(df, missing, out_dir, logger):
+def write_tables(df, agg, empty, out_dir, logger):
     out_dir = Path(out_dir)
-    csv_file = out_dir / "lora_sweep_results.csv"
-    df.to_csv(csv_file, index=False)
-    logger.info(f"✓ CSV saved: {csv_file}")
+
+    per_run = out_dir / "lora_sweep_results.csv"
+    df.to_csv(per_run, index=False)
+    logger.info(f"✓ Per-run CSV saved: {per_run}")
+
+    agg_csv = out_dir / "lora_sweep_seed_summary.csv"
+    agg.to_csv(agg_csv, index=False)
+    logger.info(f"✓ Seed-summary CSV saved: {agg_csv}")
 
     md = out_dir / "lora_sweep_report.md"
     with open(md, 'w') as f:
         f.write("# LoRA Fine-Tuning Sweep - Data Efficiency\n\n")
         f.write("LoRA r=16 alpha=32 on q/k/v/out_proj, frozen base encoder, "
                 "Dropout(0.3)->Linear head, AdamW 1e-4/1e-3, "
-                "ReduceLROnPlateau on val macro-F1, 5s/2.5s windows, seed 42.\n\n")
-        f.write(f"Runs collected: **{len(df)} / "
-                f"{len(TASKS)*len(MODELS)*len(FRACTIONS)}**\n\n")
+                "ReduceLROnPlateau on val macro-F1, 5s/2.5s windows.\n\n")
+        f.write(f"Total runs: **{len(df)}**\n\n")
+        f.write("Values are mean +/- SD across seeds. Cells with one seed show "
+                "the single value and SD 0.0000.\n\n")
 
         for task in TASKS:
+            sub_agg = agg[agg['task'] == task]
+            if sub_agg.empty:
+                continue
             f.write(f"## {TASK_LABELS[task]}\n\n")
-            f.write("| Model | Fraction | Test macro-F1 | vs zero-shot | Test acc | "
-                    "vs zero-shot | Best val F1 | Best epoch | Final train acc |\n")
+            f.write("| Model | Fraction | Seeds | Test macro-F1 | vs zero-shot | "
+                    "Test acc | vs zero-shot | F1 min-max | Mean train acc |\n")
             f.write("|---|---|---|---|---|---|---|---|---|\n")
             for model in MODELS:
                 base = zero_shot_baseline(task, model)
-                sub = df[(df['task'] == task) & (df['model'] == model)].sort_values('fraction')
-                for _, r in sub.iterrows():
-                    d_f1 = (f"{r['test_f1_macro'] - base['f1_macro']:+.4f}"
-                            if base and pd.notna(r['test_f1_macro']) else "-")
-                    d_acc = (f"{r['test_accuracy'] - base['accuracy']:+.4f}"
-                             if base and pd.notna(r['test_accuracy']) else "-")
+                rows = sub_agg[sub_agg['model'] == model].sort_values('fraction')
+                for _, r in rows.iterrows():
+                    d_f1 = f"{r['f1_mean'] - base['f1_macro']:+.4f}" if base else "-"
+                    d_acc = f"{r['acc_mean'] - base['accuracy']:+.4f}" if base else "-"
                     f.write(f"| {MODEL_LABELS[model]} | {int(r['fraction'])}% | "
-                            f"{r['test_f1_macro']:.4f} | {d_f1} | "
-                            f"{r['test_accuracy']:.4f} | {d_acc} | "
-                            f"{r['best_val_f1_macro']:.4f} | {int(r['best_epoch'])} | "
-                            f"{r['final_train_acc']:.4f} |\n")
+                            f"{int(r['n_seeds'])} | "
+                            f"{r['f1_mean']:.4f} ± {r['f1_std']:.4f} | {d_f1} | "
+                            f"{r['acc_mean']:.4f} ± {r['acc_std']:.4f} | {d_acc} | "
+                            f"{r['f1_min']:.4f}-{r['f1_max']:.4f} | "
+                            f"{r['train_acc_mean']:.4f} |\n")
                 if base:
-                    f.write(f"| *{MODEL_LABELS[model]} zero-shot* | - | "
+                    f.write(f"| *{MODEL_LABELS[model]} zero-shot* | - | - | "
                             f"*{base['f1_macro']:.4f}* | - | *{base['accuracy']:.4f}* | "
-                            f"- | - | - | - |\n")
+                            f"- | - | - |\n")
             f.write("\n")
 
-        if missing:
-            f.write("## Missing runs\n\n")
-            for m in missing:
+        if empty:
+            f.write("## Cells with no runs\n\n")
+            for m in empty:
                 f.write(f"- `{m}`\n")
             f.write("\n")
 
     logger.info(f"✓ Markdown saved: {md}")
 
 
-def log_summary(df, logger):
-    if df.empty:
+def log_summary(agg, logger):
+    if agg.empty:
         return
     logger.info("\n" + "=" * 80)
-    logger.info("DATA EFFICIENCY (test macro-F1)")
+    logger.info("DATA EFFICIENCY (test macro-F1, mean ± SD across seeds)")
     logger.info("=" * 80)
     for task in TASKS:
-        sub = df[df['task'] == task]
+        sub = agg[agg['task'] == task]
         if sub.empty:
             continue
         logger.info(f"\n{TASK_LABELS[task]}")
-        pivot = sub.pivot(index='model', columns='fraction', values='test_f1_macro')
-        logger.info("\n" + pivot.to_string(float_format=lambda x: f"{x:.4f}"))
         for model in MODELS:
-            base = zero_shot_baseline(task, model)
-            row = sub[sub['model'] == model].sort_values('fraction')
-            if base is not None and not row.empty:
-                full = row[row['fraction'] == 100]['test_f1_macro']
-                if not full.empty:
-                    logger.info(f"  {MODEL_LABELS[model]}: zero-shot {base['f1_macro']:.4f} "
-                                f"-> 100% fine-tuned {full.iloc[0]:.4f} "
-                                f"({full.iloc[0] - base['f1_macro']:+.4f})")
+            rows = sub[sub['model'] == model].sort_values('fraction')
+            if rows.empty:
+                continue
+            cells = "  ".join(
+                f"{int(r['fraction']):>4}%: {r['f1_mean']:.4f}±{r['f1_std']:.4f}"
+                f"(n={int(r['n_seeds'])})" for _, r in rows.iterrows())
+            logger.info(f"  {MODEL_LABELS[model]:24s} {cells}")
+
+        base_x = zero_shot_baseline(task, 'xls_r')
+        base_h = zero_shot_baseline(task, 'hubert_base')
+        for model, base in [('xls_r', base_x), ('hubert_base', base_h)]:
+            rows = sub[(sub['model'] == model) & (sub['fraction'] == 100)]
+            if base is not None and not rows.empty:
+                r = rows.iloc[0]
+                logger.info(f"  {MODEL_LABELS[model]}: zero-shot {base['f1_macro']:.4f} "
+                            f"-> 100% {r['f1_mean']:.4f}±{r['f1_std']:.4f} "
+                            f"({r['f1_mean'] - base['f1_macro']:+.4f})")
 
 
 def main():
@@ -276,14 +345,14 @@ def main():
     logger.info("PHASE 3 - LoRA SWEEP ANALYSIS")
     logger.info("=" * 80)
 
-    df, missing = collect(args.sweep_root, logger)
+    df, agg, empty = collect(args.sweep_root, logger)
     if df.empty:
         logger.error("No results found - nothing to analyse yet.")
         return 1
 
-    log_summary(df, logger)
-    plot_curves(df, out_dir, logger)
-    write_tables(df, missing, out_dir, logger)
+    log_summary(agg, logger)
+    plot_curves(agg, out_dir, logger)
+    write_tables(df, agg, empty, out_dir, logger)
 
     logger.info("\n✓ Sweep analysis complete!")
     return 0
