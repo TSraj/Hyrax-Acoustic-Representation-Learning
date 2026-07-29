@@ -39,7 +39,8 @@ from src.utils.audio_utils import load_audio
 class ZeroShotEvaluator:
     """Zero-shot evaluator with frozen backbone + trained FC head."""
 
-    def __init__(self, config, model_name, task, manifest_path, output_dir, logger, debug=False):
+    def __init__(self, config, model_name, task, manifest_path, output_dir, logger, debug=False,
+                 max_windows_per_file=None):
         """
         Initialize evaluator.
 
@@ -59,6 +60,8 @@ class ZeroShotEvaluator:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.debug = debug
+        # Smoke-test knob: cap windows extracted per file (None = no cap)
+        self.max_windows_per_file = max_windows_per_file
 
         # Load manifest
         with open(manifest_path, 'r') as f:
@@ -253,6 +256,10 @@ class ZeroShotEvaluator:
                         embeddings.append(embedding)
                         labels.append(label)
                         num_windows += 1
+
+                        if (self.max_windows_per_file is not None
+                                and num_windows >= self.max_windows_per_file):
+                            break
 
                     # If audio too short for even one window, use the whole thing
                     if num_windows == 0:
@@ -696,24 +703,37 @@ def main():
                        choices=["wav2vec2_base", "wav2vec2_base_960h", "hubert_base",
                                "xls_r", "wavlm", "ecapa_tdnn"])
     parser.add_argument("--task", required=True,
-                       choices=["species_id", "hyrax_id", "hyrax_id_session_holdout"])
+                       choices=["species_id", "hyrax_id", "hyrax_id_session_holdout",
+                                "hyrax_id_within_session"])
+    parser.add_argument("--manifest-dir", default="outputs/phase3/manifests",
+                       help="Directory holding <task>.json manifests")
+    parser.add_argument("--output-dir", default=None,
+                       help="Override the results output directory")
+    parser.add_argument("--log-tag", default="", help="Suffix appended to the log file name")
     parser.add_argument("--debug", action="store_true", help="Debug mode: small subset")
+    parser.add_argument("--max-windows-per-file", type=int, default=None,
+                       help="Smoke test: cap windows extracted per file (default: no cap)")
     args = parser.parse_args()
 
     # Setup logging
     log_dir = Path("outputs/phase3/logs")
     log_dir.mkdir(parents=True, exist_ok=True)
+    suffix = f"_{args.log_tag}" if args.log_tag else ""
     logger = setup_logger(
-        f"Phase3_ZeroShot_{args.task}_{args.model}",
-        log_file=str(log_dir / f"zero_shot_{args.task}_{args.model}.log")
+        f"Phase3_ZeroShot_{args.task}_{args.model}{suffix}",
+        log_file=str(log_dir / f"zero_shot_{args.task}_{args.model}{suffix}.log")
     )
 
     # Paths - use new manifest naming
-    manifest_path = Path(f"outputs/phase3/manifests/{args.task}.json")
+    manifest_path = Path(args.manifest_dir) / f"{args.task}.json"
 
     # Map task to output subfolder
-    if args.task == "hyrax_id_session_holdout":
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    elif args.task == "hyrax_id_session_holdout":
         output_dir = Path(f"outputs/phase3/zero_shot/hyrax_id/session_holdout/{args.model}")
+    elif args.task == "hyrax_id_within_session":
+        output_dir = Path(f"outputs/phase3/zero_shot/hyrax_id/within_session/{args.model}")
     else:
         output_dir = Path(f"outputs/phase3/zero_shot/{args.task}/{args.model}")
 
@@ -725,7 +745,8 @@ def main():
 
     # Run evaluation
     evaluator = ZeroShotEvaluator(
-        config, args.model, eval_task, manifest_path, output_dir, logger, debug=args.debug
+        config, args.model, eval_task, manifest_path, output_dir, logger, debug=args.debug,
+        max_windows_per_file=args.max_windows_per_file
     )
 
     evaluator.run()

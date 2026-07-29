@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 import numpy as np
 from collections import defaultdict
+from functools import lru_cache
 
 # Add parent to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -243,9 +244,14 @@ def create_species_id_manifest(hyrax_data, train_ids, val_ids, test_ids,
     return manifest
 
 
-def parse_hyrax_id_labels(data_dir, logger):
-    """Parse GTLabels to extract bout info per individual from BIODA."""
-    logger.info("\nParsing GTLabels bout annotations...")
+def parse_hyrax_id_labels(data_dir, logger, audio_subdir="BIODA/denoised"):
+    """Parse GTLabels to extract bout info per individual.
+
+    Args:
+        audio_subdir: Audio version folder relative to the location dir.
+                      "Audio" (original), "BIODA/denoised" (default), or "ACA".
+    """
+    logger.info(f"\nParsing GTLabels bout annotations (audio source: {audio_subdir})...")
 
     bouts_per_individual = defaultdict(list)
     session_profile = defaultdict(lambda: defaultdict(int))
@@ -254,8 +260,8 @@ def parse_hyrax_id_labels(data_dir, logger):
     logger.info(f"Found {len(label_files)} label files")
 
     for label_file in sorted(label_files):
-        # Find corresponding BIODA denoised audio
-        bioda_dir = label_file.parent.parent / "BIODA" / "denoised"
+        # Find corresponding audio for the selected version
+        bioda_dir = label_file.parent.parent / audio_subdir
 
         # Match audio file (same base name without _labels suffix)
         audio_name = label_file.stem.replace('_labels', '')
@@ -318,16 +324,32 @@ def parse_hyrax_id_labels(data_dir, logger):
     return dict(bouts_per_individual), dict(session_profile)
 
 
+@lru_cache(maxsize=4)
+def _load_audio_cached(path, target_sr=16000):
+    """Load+resample a source wav once; bouts from the same file reuse it.
+
+    Small cache: bouts are concatenated in file-sorted order, so a handful of
+    slots is enough to avoid re-decoding a multi-minute wav per bout.
+    """
+    audio, sr = load_audio(path, target_sr=target_sr, mono=True)
+    return audio, sr
+
+
 def concatenate_bouts(bout_list, target_sr=16000):
-    """Concatenate bout segments without silence."""
+    """Concatenate bout segments without silence.
+
+    Bouts are ordered by (source file, start time) so the concatenation is
+    deterministic and independent of how the split was drawn. For the
+    session-holdout task this is a no-op (bouts already arrive in that order).
+    """
+    ordered = sorted(bout_list, key=lambda b: (str(b['audio_file']), b['start']))
+
     segments = []
-    for bout in bout_list:
+    for bout in ordered:
         try:
-            audio, sr = load_audio(str(bout['audio_file']), target_sr=target_sr, mono=True)
-            start_sample = int(bout['start'] * sr)
-            end_sample = int(bout['end'] * sr)
-            start_sample = max(0, start_sample)
-            end_sample = min(len(audio), end_sample)
+            audio, sr = _load_audio_cached(str(bout['audio_file']), target_sr)
+            start_sample = max(0, int(bout['start'] * sr))
+            end_sample = min(len(audio), int(bout['end'] * sr))
             segments.append(audio[start_sample:end_sample])
         except Exception:
             continue
@@ -418,6 +440,116 @@ def create_hyrax_id_manifest(bouts_per_individual, session_profile, output_dir, 
     return manifest
 
 
+# --- Shared cohort definition for the 8-individual session tasks -------------
+# 8 individuals meeting criteria (>=4 sessions, >=100 bouts with clean date labels)
+SESSION_TASK_INDIVIDUALS = ['R3', 'Q7', 'P1', 'P8', 'O7', 'M9', 'U7', 'Kashtan']
+
+# Junk sessions to exclude (non-date labels)
+SESSION_TASK_JUNK = {
+    'P8': ['1301'],                      # Location code
+    'Kashtan': ['7893', 'maybeKashtan'],  # Location code + ambiguous label
+}
+
+
+def valid_bouts_for(individual, bouts_per_individual):
+    """Bouts for an individual with junk sessions removed (shared by both session tasks)."""
+    return [b for b in bouts_per_individual.get(individual, [])
+            if b['session'] not in SESSION_TASK_JUNK.get(individual, [])]
+
+
+def create_within_session_manifest(bouts_per_individual, session_profile, output_dir, logger, seed=42):
+    """Within-session control: SAME 8 individuals and SAME valid bouts as the session
+    holdout task, but bouts are split 80/20 at RANDOM so train and test share sessions.
+
+    This is the leaky counterpart to create_session_holdout_manifest(): the only thing
+    that differs between the two manifests is the split rule.
+    """
+    logger.info("\n" + "=" * 80)
+    logger.info("HYRAX ID - WITHIN-SESSION CONTROL")
+    logger.info("Random 80/20 bout split (train and test share sessions)")
+    logger.info("=" * 80)
+
+    np.random.seed(seed)
+
+    target = SESSION_TASK_INDIVIDUALS
+
+    concat_dir = output_dir / "within_session_concatenated"
+    concat_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_splits = {'train': [], 'test': []}
+    bout_inventory = {}
+
+    for ind in target:
+        valid = valid_bouts_for(ind, bouts_per_individual)
+        if not valid:
+            logger.warning(f"{ind}: no valid bouts, skipping")
+            continue
+
+        n = len(valid)
+        idx = np.random.permutation(n)
+        n_train = int(0.8 * n)
+        if n_train < 1 or n - n_train < 1:
+            n_train = max(1, n - 1)
+
+        splits_idx = {'train': idx[:n_train], 'test': idx[n_train:]}
+        bout_inventory[ind] = {
+            'total_valid_bouts': n,
+            'sessions': sorted({b['session'] for b in valid}),
+        }
+
+        logger.info(f"\n{ind}: {n} valid bouts | Train={len(splits_idx['train'])} | Test={len(splits_idx['test'])}")
+
+        for split_name, sel in splits_idx.items():
+            bout_list = [valid[i] for i in sel]
+            if not bout_list:
+                continue
+
+            concat_file = concat_dir / f"{ind}_{split_name}.wav"
+            audio = concatenate_bouts(bout_list)
+            if len(audio) > 0:
+                save_audio(str(concat_file), audio, sr=16000)
+
+            manifest_splits[split_name].append({
+                'file': str(concat_file),
+                'individual': ind,
+                'num_bouts': len(bout_list),
+                'duration': len(audio) / 16000
+            })
+
+    # Class weights (inverse frequency based on train split)
+    train_class_counts = defaultdict(int)
+    for item in manifest_splits['train']:
+        train_class_counts[item['individual']] += 1
+
+    total_train = len(manifest_splits['train'])
+    class_weights = {ind: total_train / (len(target) * train_class_counts[ind])
+                     for ind in target if train_class_counts[ind] > 0}
+
+    manifest = {
+        'task': 'hyrax_id_within_session',
+        'description': 'Within-session control - same 8 individuals and same valid bouts as '
+                       'the session holdout task, random 80/20 bout split (sessions shared)',
+        'num_classes': len(target),
+        'individuals': sorted(target),
+        'class_to_idx': {ind: idx for idx, ind in enumerate(sorted(target))},
+        'class_weights': class_weights,
+        'excluded_sessions': SESSION_TASK_JUNK,
+        'bout_inventory': bout_inventory,
+        'splits': manifest_splits,
+        'split_counts': {k: len(v) for k, v in manifest_splits.items()},
+        'seed': seed
+    }
+
+    manifest_file = output_dir / "hyrax_id_within_session.json"
+    with open(manifest_file, 'w') as f:
+        json.dump(manifest, f, indent=2)
+
+    logger.info(f"\n✓ Within-session manifest: {manifest_file}")
+    logger.info(f"  Classes: {len(target)} | Train: {len(manifest_splits['train'])} | Test: {len(manifest_splits['test'])}")
+
+    return manifest
+
+
 def create_session_holdout_manifest(bouts_per_individual, session_profile, output_dir, logger, seed=42):
     """Session holdout diagnostic: Session-stratified split for 8 individuals with ≥4 sessions and ≥100 bouts."""
     logger.info("\n" + "=" * 80)
@@ -428,14 +560,8 @@ def create_session_holdout_manifest(bouts_per_individual, session_profile, outpu
 
     np.random.seed(seed)
 
-    # 8 individuals meeting criteria (≥4 sessions, ≥100 bouts with clean date labels)
-    target = ['R3', 'Q7', 'P1', 'P8', 'O7', 'M9', 'U7', 'Kashtan']
-
-    # Junk sessions to exclude (non-date labels)
-    junk_sessions = {
-        'P8': ['1301'],          # Location code
-        'Kashtan': ['7893', 'maybeKashtan']  # Location code + ambiguous label
-    }
+    target = SESSION_TASK_INDIVIDUALS
+    junk_sessions = SESSION_TASK_JUNK
 
     # Select held-out session per individual (largest valid session)
     held_out = {}
@@ -457,14 +583,18 @@ def create_session_holdout_manifest(bouts_per_individual, session_profile, outpu
     concat_dir.mkdir(parents=True, exist_ok=True)
 
     manifest_splits = {'train': [], 'test': []}
+    bout_inventory = {}
 
     for ind in target:
         if ind not in bouts_per_individual or held_out[ind] is None:
             continue
 
         # Filter bouts: exclude junk sessions AND separate held-out
-        valid_bouts = [b for b in bouts_per_individual[ind]
-                       if b['session'] not in junk_sessions.get(ind, [])]
+        valid_bouts = valid_bouts_for(ind, bouts_per_individual)
+        bout_inventory[ind] = {
+            'total_valid_bouts': len(valid_bouts),
+            'sessions': sorted({b['session'] for b in valid_bouts}),
+        }
 
         train_bouts = [b for b in valid_bouts if b['session'] != held_out[ind]]
         test_bouts = [b for b in valid_bouts if b['session'] == held_out[ind]]
@@ -507,6 +637,7 @@ def create_session_holdout_manifest(bouts_per_individual, session_profile, outpu
         'class_weights': class_weights,
         'held_out_sessions': held_out,
         'excluded_sessions': junk_sessions,
+        'bout_inventory': bout_inventory,
         'splits': manifest_splits,
         'split_counts': {k: len(v) for k, v in manifest_splits.items()},
         'seed': seed
@@ -522,46 +653,86 @@ def create_session_holdout_manifest(bouts_per_individual, session_profile, outpu
     return manifest
 
 
+AUDIO_SOURCES = {
+    'original': 'Audio',
+    'bioda': 'BIODA/denoised',
+    'aca': 'ACA',
+}
+
+
 def main():
     """Main pipeline."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Phase 3 - Step 2: Manifest creation")
+    parser.add_argument("--audio-source", default="bioda", choices=sorted(AUDIO_SOURCES),
+                        help="Which audio version the bouts are cut from (default: bioda)")
+    parser.add_argument("--output-dir", default="outputs/phase3/manifests",
+                        help="Where manifests + concatenated wavs are written")
+    parser.add_argument("--tasks", default="all",
+                        choices=["all", "session_screen"],
+                        help="'all' = full Phase 3 set; 'session_screen' = only the two "
+                             "8-individual session tasks (denoiser screen)")
+    parser.add_argument("--log-tag", default=None,
+                        help="Suffix for the log file name (default: derived from audio source)")
+    args = parser.parse_args()
+
+    audio_subdir = AUDIO_SOURCES[args.audio_source]
+    tag = args.log_tag or args.audio_source
 
     log_dir = Path("outputs/phase3/logs")
     log_dir.mkdir(parents=True, exist_ok=True)
-    logger = setup_logger("Phase3_Manifests", log_file=str(log_dir / "manifest_creation.log"))
+    logger = setup_logger("Phase3_Manifests",
+                          log_file=str(log_dir / f"manifest_creation_{tag}.log"))
 
     logger.info("=" * 80)
     logger.info("PHASE 3 - STEP 2: MANIFEST CREATION")
+    logger.info(f"Audio source: {args.audio_source} -> */{audio_subdir}/")
+    logger.info(f"Tasks: {args.tasks}")
     logger.info("=" * 80)
 
     # Paths
     data_dir = Path("Data/YearLocation")
     hyrax_dir = Path("outputs/phase3/hyrax_data")
     phase2_manifests_dir = Path("outputs/phase2/manifests")
-    output_dir = Path("outputs/phase3/manifests")
+    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Parse Hyrax-ID bout labels
-    bouts_per_individual, session_profile = parse_hyrax_id_labels(data_dir, logger)
+    bouts_per_individual, session_profile = parse_hyrax_id_labels(
+        data_dir, logger, audio_subdir=audio_subdir
+    )
 
     # Save session profile
-    profile = {'individuals': {ind: {'total_bouts': sum(sessions.values()), 'sessions': dict(sessions)}
-                                for ind, sessions in session_profile.items()}}
+    profile = {'audio_source': args.audio_source,
+               'audio_subdir': audio_subdir,
+               'individuals': {ind: {'total_bouts': sum(sessions.values()), 'sessions': dict(sessions)}
+                               for ind, sessions in session_profile.items()}}
     with open(output_dir / "hyrax_session_profile.json", 'w') as f:
         json.dump(profile, f, indent=2)
 
-    # Create Hyrax ID manifests
-    hyrax_id_manifest = create_hyrax_id_manifest(bouts_per_individual, session_profile, output_dir, logger)
-    session_holdout_manifest = create_session_holdout_manifest(bouts_per_individual, session_profile, output_dir, logger)
-
-    # Load old concatenated hyrax data for species_id
-    hyrax_data = load_hyrax_data(hyrax_dir)
-    train_ids, val_ids, test_ids = split_individuals(list(hyrax_data.keys()))
-
-    # Create Species ID manifest
-    species_id_manifest = create_species_id_manifest(
-        hyrax_data, train_ids, val_ids, test_ids,
-        phase2_manifests_dir, output_dir, logger
+    # Both session tasks (built for every mode)
+    within_session_manifest = create_within_session_manifest(
+        bouts_per_individual, session_profile, output_dir, logger
     )
+    session_holdout_manifest = create_session_holdout_manifest(
+        bouts_per_individual, session_profile, output_dir, logger
+    )
+
+    hyrax_id_manifest = None
+    if args.tasks == "all":
+        hyrax_id_manifest = create_hyrax_id_manifest(
+            bouts_per_individual, session_profile, output_dir, logger
+        )
+
+        # Load old concatenated hyrax data for species_id
+        hyrax_data = load_hyrax_data(hyrax_dir)
+        train_ids, val_ids, test_ids = split_individuals(list(hyrax_data.keys()))
+
+        create_species_id_manifest(
+            hyrax_data, train_ids, val_ids, test_ids,
+            phase2_manifests_dir, output_dir, logger
+        )
 
     # Summary
     logger.info("\n" + "=" * 80)
@@ -569,9 +740,11 @@ def main():
     logger.info("=" * 80)
     logger.info(f"\nOutput: {output_dir}")
     logger.info(f"  - hyrax_session_profile.json")
-    logger.info(f"  - hyrax_id.json ({hyrax_id_manifest['num_classes']} classes - MAIN TASK)")
+    logger.info(f"  - hyrax_id_within_session.json ({within_session_manifest['num_classes']} classes - CONTROL)")
     logger.info(f"  - hyrax_id_session_holdout.json ({session_holdout_manifest['num_classes']} classes - DIAGNOSTIC)")
-    logger.info(f"  - species_id.json (8 classes)")
+    if hyrax_id_manifest is not None:
+        logger.info(f"  - hyrax_id.json ({hyrax_id_manifest['num_classes']} classes - MAIN TASK)")
+        logger.info(f"  - species_id.json (8 classes)")
     logger.info("\n✓ Ready for experiments!")
 
 
