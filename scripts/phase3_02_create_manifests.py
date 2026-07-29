@@ -550,6 +550,122 @@ def create_within_session_manifest(bouts_per_individual, session_profile, output
     return manifest
 
 
+def create_session_holdout_ft_manifest(bouts_per_individual, session_profile, output_dir,
+                                       logger, seed=42):
+    """Session holdout WITH a session-disjoint validation split (for fine-tuning).
+
+    Identical to create_session_holdout_manifest() except that a second session per
+    individual is carved out as validation:
+
+        test  = largest valid session   (SAME session as the zero-shot session-holdout
+                                         manifest, so results stay comparable to that
+                                         baseline)
+        val   = second-largest valid session
+        train = all remaining valid sessions
+
+    train is therefore slightly smaller than in the zero-shot manifest, since the
+    val session is removed from it.
+    """
+    logger.info("\n" + "=" * 80)
+    logger.info("HYRAX ID - SESSION HOLDOUT + SESSION-DISJOINT VAL (fine-tuning)")
+    logger.info("test = largest session (unchanged) | val = 2nd largest | train = rest")
+    logger.info("=" * 80)
+
+    np.random.seed(seed)
+
+    target = SESSION_TASK_INDIVIDUALS
+    held_out, val_sessions = {}, {}
+
+    for ind in target:
+        if ind not in session_profile:
+            continue
+        valid = {s: c for s, c in session_profile[ind].items()
+                 if s not in SESSION_TASK_JUNK.get(ind, [])}
+        ordered = sorted(valid.items(), key=lambda x: (-x[1], x[0]))
+        held_out[ind] = ordered[0][0] if ordered else None
+        val_sessions[ind] = ordered[1][0] if len(ordered) > 1 else None
+
+    concat_dir = output_dir / "session_holdout_ft_concatenated"
+    concat_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_splits = {'train': [], 'val': [], 'test': []}
+    bout_inventory = {}
+
+    for ind in target:
+        if ind not in bouts_per_individual or held_out.get(ind) is None:
+            continue
+
+        valid_bouts = valid_bouts_for(ind, bouts_per_individual)
+        bout_inventory[ind] = {
+            'total_valid_bouts': len(valid_bouts),
+            'sessions': sorted({b['session'] for b in valid_bouts}),
+        }
+
+        by_split = {
+            'test': [b for b in valid_bouts if b['session'] == held_out[ind]],
+            'val': [b for b in valid_bouts if b['session'] == val_sessions[ind]],
+            'train': [b for b in valid_bouts
+                      if b['session'] not in (held_out[ind], val_sessions[ind])],
+        }
+
+        logger.info(f"\n{ind}: test={held_out[ind]} ({len(by_split['test'])}) | "
+                    f"val={val_sessions[ind]} ({len(by_split['val'])}) | "
+                    f"train={len(by_split['train'])} bouts")
+        if not by_split['train']:
+            logger.warning(f"  {ind}: NO training bouts left after removing test+val sessions")
+
+        for split_name, bout_list in by_split.items():
+            if not bout_list:
+                continue
+            concat_file = concat_dir / f"{ind}_{split_name}.wav"
+            audio = concatenate_bouts(bout_list)
+            if len(audio) > 0:
+                save_audio(str(concat_file), audio, sr=16000)
+
+            manifest_splits[split_name].append({
+                'file': str(concat_file),
+                'individual': ind,
+                'num_bouts': len(bout_list),
+                'duration': len(audio) / 16000,
+                'session': (held_out[ind] if split_name == 'test'
+                            else val_sessions[ind] if split_name == 'val' else None)
+            })
+
+    train_class_counts = defaultdict(int)
+    for item in manifest_splits['train']:
+        train_class_counts[item['individual']] += 1
+    total_train = len(manifest_splits['train'])
+    class_weights = {ind: total_train / (len(target) * train_class_counts[ind])
+                     for ind in target if train_class_counts[ind] > 0}
+
+    manifest = {
+        'task': 'hyrax_id_session_holdout_ft',
+        'description': 'Session holdout with session-disjoint val split, for fine-tuning. '
+                       'Test session matches the zero-shot session-holdout manifest.',
+        'num_classes': len(target),
+        'individuals': sorted(target),
+        'class_to_idx': {ind: idx for idx, ind in enumerate(sorted(target))},
+        'class_weights': class_weights,
+        'held_out_sessions': held_out,
+        'val_sessions': val_sessions,
+        'excluded_sessions': SESSION_TASK_JUNK,
+        'bout_inventory': bout_inventory,
+        'splits': manifest_splits,
+        'split_counts': {k: len(v) for k, v in manifest_splits.items()},
+        'seed': seed
+    }
+
+    manifest_file = output_dir / "hyrax_id_session_holdout_ft.json"
+    with open(manifest_file, 'w') as f:
+        json.dump(manifest, f, indent=2)
+
+    logger.info(f"\n✓ Session holdout (fine-tuning) manifest: {manifest_file}")
+    logger.info(f"  Classes: {len(target)} | " +
+                " | ".join(f"{k.capitalize()}: {len(v)}" for k, v in manifest_splits.items()))
+
+    return manifest
+
+
 def create_session_holdout_manifest(bouts_per_individual, session_profile, output_dir, logger, seed=42):
     """Session holdout diagnostic: Session-stratified split for 8 individuals with ≥4 sessions and ≥100 bouts."""
     logger.info("\n" + "=" * 80)
@@ -670,9 +786,11 @@ def main():
     parser.add_argument("--output-dir", default="outputs/phase3/manifests",
                         help="Where manifests + concatenated wavs are written")
     parser.add_argument("--tasks", default="all",
-                        choices=["all", "session_screen"],
-                        help="'all' = full Phase 3 set; 'session_screen' = only the two "
-                             "8-individual session tasks (denoiser screen)")
+                        choices=["all", "session_screen", "session_ft"],
+                        help="'all' = full Phase 3 set; 'session_screen' = the two "
+                             "8-individual session tasks (denoiser screen); "
+                             "'session_ft' = session holdout with a session-disjoint "
+                             "val split (fine-tuning)")
     parser.add_argument("--log-tag", default=None,
                         help="Suffix for the log file name (default: derived from audio source)")
     args = parser.parse_args()
@@ -711,13 +829,20 @@ def main():
     with open(output_dir / "hyrax_session_profile.json", 'w') as f:
         json.dump(profile, f, indent=2)
 
-    # Both session tasks (built for every mode)
-    within_session_manifest = create_within_session_manifest(
-        bouts_per_individual, session_profile, output_dir, logger
-    )
-    session_holdout_manifest = create_session_holdout_manifest(
-        bouts_per_individual, session_profile, output_dir, logger
-    )
+    within_session_manifest = session_holdout_manifest = session_ft_manifest = None
+
+    if args.tasks in ("all", "session_screen"):
+        within_session_manifest = create_within_session_manifest(
+            bouts_per_individual, session_profile, output_dir, logger
+        )
+        session_holdout_manifest = create_session_holdout_manifest(
+            bouts_per_individual, session_profile, output_dir, logger
+        )
+
+    if args.tasks in ("all", "session_ft"):
+        session_ft_manifest = create_session_holdout_ft_manifest(
+            bouts_per_individual, session_profile, output_dir, logger
+        )
 
     hyrax_id_manifest = None
     if args.tasks == "all":
@@ -740,8 +865,11 @@ def main():
     logger.info("=" * 80)
     logger.info(f"\nOutput: {output_dir}")
     logger.info(f"  - hyrax_session_profile.json")
-    logger.info(f"  - hyrax_id_within_session.json ({within_session_manifest['num_classes']} classes - CONTROL)")
-    logger.info(f"  - hyrax_id_session_holdout.json ({session_holdout_manifest['num_classes']} classes - DIAGNOSTIC)")
+    if within_session_manifest is not None:
+        logger.info(f"  - hyrax_id_within_session.json ({within_session_manifest['num_classes']} classes - CONTROL)")
+        logger.info(f"  - hyrax_id_session_holdout.json ({session_holdout_manifest['num_classes']} classes - DIAGNOSTIC)")
+    if session_ft_manifest is not None:
+        logger.info(f"  - hyrax_id_session_holdout_ft.json ({session_ft_manifest['num_classes']} classes - FINE-TUNING)")
     if hyrax_id_manifest is not None:
         logger.info(f"  - hyrax_id.json ({hyrax_id_manifest['num_classes']} classes - MAIN TASK)")
         logger.info(f"  - species_id.json (8 classes)")
