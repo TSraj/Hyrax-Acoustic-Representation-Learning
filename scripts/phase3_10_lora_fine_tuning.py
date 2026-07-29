@@ -56,60 +56,144 @@ STRIDE_SECONDS = 2.5
 SAMPLE_RATE = 16000
 
 
+def resolve_path(file_path):
+    """Phase 2 manifest paths are relative to Data/; Phase 3 paths are not."""
+    p = Path(file_path)
+    if not p.exists() and not str(file_path).startswith('outputs/'):
+        p = Path("Data") / file_path
+    return p
+
+
 class WindowedDataset:
     """Windows every file in a split into fixed-length audio segments.
 
     Fix #2 and #3: training operates on 5s windows, never whole concatenated
-    files, so the sample count is ~1000 rather than 1-per-class and the model
-    input length is bounded by construction.
+    files, so the sample count is large and the model input length is bounded
+    by construction.
+
+    Windows are materialised once into a float16 memmap on disk and reused by
+    every later epoch, run and data fraction. species_id has ~14.6k training
+    files, so re-decoding per epoch (many of them mp3) would dominate runtime,
+    and holding them as float32 in RAM would cost several GB.
     """
 
-    def __init__(self, items, class_to_idx, logger, split_name):
-        self.windows = []
-        self.labels = []
-        window_samples = int(WINDOW_SECONDS * SAMPLE_RATE)
+    def __init__(self, items, class_to_idx, label_key, logger, split_name,
+                 cache_dir, max_windows_per_file=None, rebuild=False):
+        self.logger = logger
+        self.split_name = split_name
+        self.window_samples = int(WINDOW_SECONDS * SAMPLE_RATE)
         stride_samples = int(STRIDE_SECONDS * SAMPLE_RATE)
 
-        for item in items:
-            path = item['file']
-            label = class_to_idx[item['individual']]
-            audio, _ = load_audio(str(path), target_sr=SAMPLE_RATE, mono=True)
+        cache_dir = Path(cache_dir)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        key = self._cache_key(items, label_key, max_windows_per_file)
+        self.data_file = cache_dir / f"{split_name}_{key}_windows.npy"
+        self.label_file = cache_dir / f"{split_name}_{key}_labels.npy"
 
-            n = 0
-            for start in range(0, len(audio) - window_samples + 1, stride_samples):
-                self.windows.append(audio[start:start + window_samples].astype(np.float32))
-                self.labels.append(label)
-                n += 1
+        if rebuild or not (self.data_file.exists() and self.label_file.exists()):
+            self._build(items, class_to_idx, label_key, stride_samples,
+                        max_windows_per_file)
+        else:
+            logger.info(f"  {split_name}: reusing window cache {self.data_file.name}")
 
-            if n == 0 and len(audio) > 0:
-                # Too short for a full window: pad the remainder to one window
-                padded = np.zeros(window_samples, dtype=np.float32)
-                padded[:len(audio)] = audio
-                self.windows.append(padded)
-                self.labels.append(label)
-                n = 1
-
-            logger.info(f"    {item['individual']:8s} {item.get('session') or '':8s} "
-                        f"{item['duration']:8.1f}s -> {n:5d} windows")
-
-        self.labels = np.array(self.labels, dtype=np.int64)
+        self.labels = np.load(self.label_file)
+        self.windows = np.load(self.data_file, mmap_mode='r')
+        self.indices = np.arange(len(self.labels))
 
         counts = np.bincount(self.labels, minlength=len(class_to_idx))
-        logger.info(f"  {split_name}: {len(self.windows)} windows | "
-                    f"per-class {counts.tolist()}")
+        logger.info(f"  {split_name}: {len(self.labels)} windows | per-class {counts.tolist()}")
         self.class_counts = counts
 
+    @staticmethod
+    def _cache_key(items, label_key, max_windows_per_file):
+        import hashlib
+        h = hashlib.md5()
+        h.update(f"{WINDOW_SECONDS}|{STRIDE_SECONDS}|{label_key}|{max_windows_per_file}".encode())
+        for it in items:
+            h.update(str(it['file']).encode())
+        return h.hexdigest()[:12]
+
+    def _build(self, items, class_to_idx, label_key, stride_samples, max_windows_per_file):
+        self.logger.info(f"  {self.split_name}: building window cache "
+                         f"({len(items)} files)...")
+        chunks, labels, failed = [], [], 0
+
+        for item in tqdm(items, desc=f"window {self.split_name}", leave=False):
+            label = class_to_idx[item[label_key]]
+            try:
+                audio, _ = load_audio(str(resolve_path(item['file'])),
+                                      target_sr=SAMPLE_RATE, mono=True)
+            except Exception:
+                failed += 1
+                continue
+
+            n = 0
+            for start in range(0, len(audio) - self.window_samples + 1, stride_samples):
+                chunks.append(audio[start:start + self.window_samples].astype(np.float16))
+                labels.append(label)
+                n += 1
+                if max_windows_per_file is not None and n >= max_windows_per_file:
+                    break
+
+            if n == 0 and len(audio) > 0:
+                # Shorter than one window: right-pad to exactly one window
+                padded = np.zeros(self.window_samples, dtype=np.float16)
+                padded[:len(audio)] = audio
+                chunks.append(padded)
+                labels.append(label)
+
+        if failed:
+            self.logger.warning(f"  {self.split_name}: {failed} files failed to load")
+        if not chunks:
+            raise RuntimeError(f"No windows produced for split {self.split_name}")
+
+        arr = np.stack(chunks)
+        # Atomic write so concurrent array tasks cannot read a partial cache.
+        # Write through a file handle: np.save(path) appends ".npy" to any path
+        # that does not already end in it, which would break the rename.
+        tmp_data = Path(str(self.data_file) + ".tmp")
+        tmp_lab = Path(str(self.label_file) + ".tmp")
+        with open(tmp_data, 'wb') as f:
+            np.save(f, arr)
+        with open(tmp_lab, 'wb') as f:
+            np.save(f, np.array(labels, dtype=np.int64))
+        tmp_data.replace(self.data_file)
+        tmp_lab.replace(self.label_file)
+        self.logger.info(f"  {self.split_name}: cached {arr.shape} -> {self.data_file.name}")
+
+    def subsample(self, fraction, seed):
+        """Stratified subsample of WINDOWS, keeping every class represented.
+
+        Applied at window level rather than file level because the hyrax task
+        has exactly one concatenated file per class per split, which makes a
+        file-level fraction meaningless.
+        """
+        if fraction >= 1.0:
+            return
+        rng = np.random.default_rng(seed)
+        keep = []
+        for cls in np.unique(self.labels):
+            cls_idx = np.where(self.labels == cls)[0]
+            n = max(1, int(round(len(cls_idx) * fraction)))
+            keep.append(rng.choice(cls_idx, size=n, replace=False))
+        self.indices = np.sort(np.concatenate(keep))
+        counts = np.bincount(self.labels[self.indices],
+                             minlength=len(self.class_counts))
+        self.class_counts = counts
+        self.logger.info(f"  {self.split_name}: subsampled to {fraction:.0%} -> "
+                         f"{len(self.indices)} windows | per-class {counts.tolist()}")
+
     def __len__(self):
-        return len(self.windows)
+        return len(self.indices)
 
     def batches(self, batch_size, shuffle=False, rng=None):
-        idx = np.arange(len(self.windows))
+        idx = self.indices.copy()
         if shuffle:
             (rng or np.random).shuffle(idx)
         for i in range(0, len(idx), batch_size):
-            sel = idx[i:i + batch_size]
-            yield ([self.windows[j] for j in sel],
-                   torch.from_numpy(self.labels[sel]))
+            sel = np.sort(idx[i:i + batch_size])
+            audio = [np.asarray(self.windows[j], dtype=np.float32) for j in sel]
+            yield audio, torch.from_numpy(self.labels[sel])
 
 
 class LoRAFineTuner:
@@ -126,8 +210,14 @@ class LoRAFineTuner:
             self.manifest = json.load(f)
 
         self.num_classes = self.manifest['num_classes']
-        self.class_to_idx = self.manifest['class_to_idx']
+        if 'species_to_idx' in self.manifest:      # species_id
+            self.class_to_idx = self.manifest['species_to_idx']
+            self.label_key = 'species'
+        else:                                      # hyrax individual tasks
+            self.class_to_idx = self.manifest['class_to_idx']
+            self.label_key = 'individual'
         self.class_names = sorted(self.class_to_idx, key=self.class_to_idx.get)
+        self.logger_label_key = self.label_key
 
         if torch.cuda.is_available():
             self.device = 'cuda'
@@ -222,17 +312,27 @@ class LoRAFineTuner:
 
     # ------------------------------------------------------------------- data
 
-    def load_splits(self):
+    def load_splits(self, build_only=False):
         self.logger.info("\n" + "=" * 80)
-        self.logger.info(f"WINDOWING ({WINDOW_SECONDS}s / {STRIDE_SECONDS}s stride)")
+        self.logger.info(f"WINDOWING ({WINDOW_SECONDS}s / {STRIDE_SECONDS}s stride) "
+                         f"| label key: {self.label_key}")
         self.logger.info("=" * 80)
         datasets = {}
         for split in ['train', 'val', 'test']:
             items = self.manifest['splits'].get(split, [])
             if not items:
                 continue
-            self.logger.info(f"\n  {split}:")
-            datasets[split] = WindowedDataset(items, self.class_to_idx, self.logger, split)
+            datasets[split] = WindowedDataset(
+                items, self.class_to_idx, self.label_key, self.logger, split,
+                cache_dir=self.args.cache_dir,
+                max_windows_per_file=self.args.max_windows_per_file,
+                rebuild=self.args.rebuild_cache,
+            )
+
+        if not build_only and self.args.data_fraction < 1.0:
+            # Only the training split is reduced; val/test stay full.
+            datasets['train'].subsample(self.args.data_fraction, self.args.seed)
+
         return datasets
 
     def _class_weights(self, train_ds):
@@ -454,6 +554,43 @@ class LoRAFineTuner:
             'labels': labels_all,
         }
 
+    # ----------------------------------------------------------- checkpointing
+
+    def _adapter_state(self):
+        """Adapter + head weights only.
+
+        The full PeftModel state_dict is ~318M params (~1.2 GB); the base
+        encoder is frozen so only the adapters and head can change. Saving just
+        those keeps per-epoch checkpoints at ~12 MB.
+        """
+        from peft import get_peft_model_state_dict
+        return {
+            'adapters': copy.deepcopy(get_peft_model_state_dict(self.model)),
+            'classifier': copy.deepcopy(self.classifier.state_dict()),
+        }
+
+    def _load_adapter_state(self, state):
+        from peft import set_peft_model_state_dict
+        set_peft_model_state_dict(self.model, state['adapters'])
+        self.classifier.load_state_dict(state['classifier'])
+
+    def _save_checkpoint(self, path, epoch, optimizer, scheduler, history,
+                         best_f1, best_epoch, best_state, patience_counter):
+        tmp = Path(str(path) + ".tmp")
+        torch.save({
+            'epoch': epoch,
+            'current_state': self._adapter_state(),
+            'best_state': best_state,
+            'optimizer': optimizer.state_dict(),
+            'scheduler': scheduler.state_dict(),
+            'history': history,
+            'best_f1': best_f1,
+            'best_epoch': best_epoch,
+            'patience_counter': patience_counter,
+            'config': vars(self.args),
+        }, tmp)
+        tmp.replace(path)
+
     def train(self, datasets):
         train_ds, val_ds = datasets['train'], datasets['val']
 
@@ -466,6 +603,27 @@ class LoRAFineTuner:
         scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5,
                                       patience=self.args.plateau_patience)
 
+        # --- resume if a checkpoint exists
+        ckpt_path = self.output_dir / "checkpoint.pt"
+        start_epoch = 0
+        history = {'train_loss': [], 'train_acc': [], 'val_acc': [],
+                   'val_f1_macro': [], 'val_loss': [], 'lr': []}
+        best_f1, best_epoch, patience_counter = -1.0, -1, 0
+        best_state = None
+
+        if ckpt_path.exists() and not self.args.no_resume:
+            ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+            self._load_adapter_state(ckpt['current_state'])
+            optimizer.load_state_dict(ckpt['optimizer'])
+            scheduler.load_state_dict(ckpt['scheduler'])
+            history = ckpt['history']
+            best_f1, best_epoch = ckpt['best_f1'], ckpt['best_epoch']
+            best_state = ckpt['best_state']
+            patience_counter = ckpt['patience_counter']
+            start_epoch = ckpt['epoch']
+            self.logger.info(f"\n✓ Resumed from {ckpt_path} at epoch {start_epoch} "
+                             f"(best val macro-F1 {best_f1:.4f} @ epoch {best_epoch})")
+
         self.logger.info("\n" + "=" * 80)
         self.logger.info("TRAINING")
         self.logger.info(f"  adapters lr={self.args.encoder_lr} | head lr={self.args.head_lr}")
@@ -475,17 +633,12 @@ class LoRAFineTuner:
                          f"| early-stop patience={self.args.patience}")
         self.logger.info("=" * 80)
 
-        rng = np.random.default_rng(self.args.seed)
-        history = {'train_loss': [], 'train_acc': [], 'val_acc': [],
-                   'val_f1_macro': [], 'val_loss': [], 'lr': []}
-
-        best_f1, best_epoch, patience_counter = -1.0, -1, 0
-        best_state = None
+        rng = np.random.default_rng(self.args.seed + start_epoch)
 
         self.model.train()
         self.classifier.train()
 
-        for epoch in range(self.args.max_epochs):
+        for epoch in range(start_epoch, self.args.max_epochs):
             losses, correct, total = [], 0, 0
             n_batches = int(np.ceil(len(train_ds) / self.args.batch_size))
 
@@ -524,22 +677,26 @@ class LoRAFineTuner:
                 f"| val macro-F1 {val['f1_macro']:.4f} | lr {current_lr:.2e}"
             )
 
+            stop = False
             if val['f1_macro'] > best_f1:
                 best_f1, best_epoch, patience_counter = val['f1_macro'], epoch + 1, 0
                 # Fix #4: deep-copy, not a live reference
-                best_state = {
-                    'model': copy.deepcopy(self.model.state_dict()),
-                    'classifier': copy.deepcopy(self.classifier.state_dict()),
-                }
+                best_state = self._adapter_state()
             else:
                 patience_counter += 1
                 if patience_counter >= self.args.patience:
                     self.logger.info(f"Early stopping at epoch {epoch+1}")
-                    break
+                    stop = True
+
+            # Checkpoint every epoch so a job killed at the wall clock resumes here
+            self._save_checkpoint(ckpt_path, epoch + 1, optimizer, scheduler,
+                                  history, best_f1, best_epoch, best_state,
+                                  patience_counter)
+            if stop:
+                break
 
         if best_state is not None:
-            self.model.load_state_dict(best_state['model'])
-            self.classifier.load_state_dict(best_state['classifier'])
+            self._load_adapter_state(best_state)
             self.logger.info(f"\n✓ Restored best checkpoint "
                              f"(epoch {best_epoch}, val macro-F1 {best_f1:.4f})")
 
@@ -623,6 +780,19 @@ def main():
     parser.add_argument("--baseline-f1", type=float, default=0.1017,
                         help="Zero-shot macro-F1 to beat (drawn on the curve)")
     parser.add_argument("--seed", type=int, default=42)
+    # Sweep / HPC
+    parser.add_argument("--data-fraction", type=float, default=1.0,
+                        help="Fraction of TRAINING windows to keep (stratified)")
+    parser.add_argument("--cache-dir", default="outputs/phase3/window_cache",
+                        help="Where windowed audio caches live (shared across runs)")
+    parser.add_argument("--rebuild-cache", action="store_true")
+    parser.add_argument("--build-cache-only", action="store_true",
+                        help="Materialise window caches and exit (run once before an array)")
+    parser.add_argument("--max-windows-per-file", type=int, default=None,
+                        help="Cap windows per source file (use for species_id, which has "
+                             "~14.6k files)")
+    parser.add_argument("--no-resume", action="store_true",
+                        help="Ignore an existing checkpoint and start fresh")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -637,6 +807,22 @@ def main():
     logger.info("=" * 80)
     logger.info("PHASE 3 - LoRA FINE-TUNING")
     logger.info("=" * 80)
+
+    if args.build_cache_only:
+        # Cache building needs no model; skip the 300M download/load.
+        tuner = LoRAFineTuner.__new__(LoRAFineTuner)
+        tuner.args, tuner.logger = args, logger
+        tuner.output_dir = Path(args.output_dir)
+        tuner.output_dir.mkdir(parents=True, exist_ok=True)
+        with open(args.manifest) as f:
+            tuner.manifest = json.load(f)
+        if 'species_to_idx' in tuner.manifest:
+            tuner.class_to_idx, tuner.label_key = tuner.manifest['species_to_idx'], 'species'
+        else:
+            tuner.class_to_idx, tuner.label_key = tuner.manifest['class_to_idx'], 'individual'
+        tuner.load_splits(build_only=True)
+        logger.info("\n✓ Window caches built.")
+        return 0
 
     tuner = LoRAFineTuner(args.model, args.manifest, args.output_dir, logger, args)
     datasets = tuner.load_splits()
