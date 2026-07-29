@@ -2,9 +2,9 @@
 #SBATCH --job-name=phase3_lora_sweep
 #SBATCH --partition=v100
 #SBATCH --gres=gpu:v100:1
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=2
 #SBATCH --time=24:00:00
-#SBATCH --array=0-15
+#SBATCH --array=0-15%4
 #SBATCH --output=logs/phase3_lora_sweep_%A_%a.out
 #SBATCH --error=logs/phase3_lora_sweep_%A_%a.err
 
@@ -14,6 +14,9 @@
 #   tasks     : species_id x hyrax_id_session_holdout_ft              = 2
 #   fractions : 10% / 25% / 50% / 100% of training windows            = 4
 #   total     : 2 x 2 x 4 = 16 array tasks
+#
+# --array=0-15%4 runs at most 4 concurrently, to stay inside TinyGPU's per-user
+# GPU limit. Raise or drop the %4 if your allocation allows more.
 #
 # Config is exactly the one validated in the single XLS-R run:
 #   LoRA r=16 alpha=32 dropout=0.05 on q/k/v/out_proj, all layers
@@ -31,9 +34,9 @@
 #   sbatch --array=3,7,11 run_phase3_lora_sweep.sh
 # Use --no-resume to force a task to start over.
 #
-# Submit AFTER the cache prep job:
-#   JID=$(sbatch --parsable run_phase3_lora_cache.sh)
-#   sbatch --dependency=afterok:$JID run_phase3_lora_sweep.sh
+# Submit AFTER the cache prep job. Use run_phase3_lora_submit.sh, which checks
+# that the prep job actually got a job id first - if that submission fails, an
+# empty $JID turns into "Job dependency problem" here and both jobs are lost.
 
 set -e
 

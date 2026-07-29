@@ -1,12 +1,17 @@
 #!/bin/bash
 #SBATCH --job-name=phase3_lora_cache
-#SBATCH --partition=singlenode
-#SBATCH --cpus-per-task=8
+#SBATCH --partition=v100
+#SBATCH --gres=gpu:v100:1
+#SBATCH --cpus-per-task=2
 #SBATCH --time=04:00:00
 #SBATCH --output=logs/phase3_lora_cache_%j.out
 #SBATCH --error=logs/phase3_lora_cache_%j.err
 
-# Phase 3 - LoRA sweep, PREP JOB (no GPU needed)
+# Phase 3 - LoRA sweep, PREP JOB
+#
+# This job is CPU-only work (audio decoding), but TinyGPU rejects any job that
+# does not allocate a GPU, so it requests one v100 like every other job in this
+# repo. Headers match run_phase3_part1_zero_shot.sh, which is known to submit.
 #
 # Materialises the windowed-audio caches once, before the array runs. Without
 # this, all 16 array tasks would decode the same audio concurrently - species_id
@@ -21,6 +26,7 @@ set -e
 PROJECT_DIR="/home/hpc/iwi5/iwi5452h/project/Hyrax-Acoustic-Representation-Learning"
 cd "$PROJECT_DIR"
 
+module load cuda/11.8.0
 module load python/3.12-conda
 source venv/bin/activate
 mkdir -p logs
