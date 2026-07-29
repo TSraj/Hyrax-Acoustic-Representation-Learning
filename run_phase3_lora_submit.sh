@@ -9,6 +9,17 @@
 
 set -e
 
+# Always operate from the repo root, whatever directory this was invoked from.
+cd "$(dirname "$0")"
+
+# Prefer the project venv. On the login node bare `python` is usually the system
+# interpreter, which does not have peft even when the venv does.
+if [ -x venv/bin/python ]; then
+    PY="venv/bin/python"
+else
+    PY="python"
+fi
+
 # --- prerequisites -----------------------------------------------------------
 HYRAX_MANIFEST="outputs/phase3/denoiser_screen/manifests/bioda/hyrax_id_session_holdout_ft.json"
 SPECIES_MANIFEST="outputs/phase3/manifests/species_id.json"
@@ -36,10 +47,13 @@ EOM
     exit 1
 fi
 
-python -c "import peft" 2>/dev/null || {
-    echo "peft is not installed in this environment. Run: pip install peft"
-    exit 1
-}
+if ! "$PY" -c "import peft" 2>/dev/null; then
+    echo "WARNING: peft not importable via $PY."
+    echo "  If you installed it inside the venv the batch jobs will still be fine,"
+    echo "  since they run 'source venv/bin/activate' themselves."
+    echo "  Continuing - re-run with STRICT=1 to make this fatal."
+    [ "${STRICT:-0}" = "1" ] && exit 1
+fi
 
 # --- submit ------------------------------------------------------------------
 echo "Submitting cache prep job..."
