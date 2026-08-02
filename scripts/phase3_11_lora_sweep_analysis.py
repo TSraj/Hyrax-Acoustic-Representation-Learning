@@ -2,15 +2,27 @@
 """
 Phase 3 - Step 11: LoRA Sweep Analysis (data efficiency)
 
-Aggregates the 16 runs produced by run_phase3_lora_sweep.sh:
+Aggregates every LoRA run under outputs/phase3/lora_sweep_V2:
 
     models    xls_r (multilingual) x hubert_base (monolingual)
     tasks     species_id x hyrax_id_session_holdout_ft
-    fractions 10% / 25% / 50% / 100% of training windows
+    fractions hyrax    10% / 25% / 50% / 100%          (5 seeds at each)
+              species  1% / 2% / 5% / 10% / 25%        (5 seeds at each)
+                       50% / 100%                      (1 seed - saturated)
 
 and produces the data-efficiency curves - test macro-F1 and accuracy against
 training fraction, one line per model, one panel per task - plus a per-run
 table as CSV and markdown.
+
+The two tasks no longer share a fraction grid: species ID saturates at >=50%
+(both models ~0.977), so it was extended down to 1% to expose the region where
+the models actually differ. The species panel therefore uses a log x-axis, and
+because its grid is ragged the per-point seed count is annotated on the axis
+rather than claimed once in the legend.
+
+Species ID also reports macro-F1 over the 7 non-hyrax classes. Its hyrax class
+has only 2 test files, so a single test item moves the 8-class macro-F1 by
+0.0625 - large enough to read as curve structure when it is not.
 
 Zero-shot baselines are read from outputs/phase3/zero_shot/ rather than
 hardcoded, and drawn as dashed reference lines in each model's colour. The
@@ -47,7 +59,22 @@ MODEL_LABELS = {
     "hubert_base": "HuBERT (monolingual)",
 }
 MODEL_COLORS = {"xls_r": "#0173B2", "hubert_base": "#DE8F05"}
-FRACTIONS = [10, 25, 50, 100]
+
+# Species ID was extended below the saturation ceiling (it reaches ~0.977 for
+# both models by 50%), so the two tasks no longer share a fraction grid.
+TASK_FRACTIONS = {
+    "hyrax_session_holdout": [10, 25, 50, 100],
+    "species_id": [1, 2, 5, 10, 25, 50, 100],
+}
+FRACTIONS = sorted({f for v in TASK_FRACTIONS.values() for f in v})
+
+# Species ID carries a hyrax class with only 2 val and 2 test files, so a
+# single test item is worth 0.0625 of the 8-class macro-F1. Every species
+# figure and table therefore also reports macro-F1 over the 7 non-hyrax
+# classes as a robustness check. The hyrax individual-ID task has no such
+# class, so the 7-class column is undefined there.
+ROBUSTNESS_DROP_CLASS = {"species_id": "hyrax"}
+
 N_CLASSES = 8  # both tasks are 8-class, so chance is the same
 
 
@@ -65,6 +92,26 @@ def zero_shot_baseline(task, model):
     return {'accuracy': t['accuracy'], 'f1_macro': t['f1_macro']}
 
 
+def robustness_f1(result, task):
+    """Macro-F1 recomputed with the tiny hyrax class dropped (species_id only).
+
+    Returns None where no class is dropped, so the column stays empty for the
+    hyrax individual-ID task rather than silently duplicating the 8-class value.
+    """
+    drop = ROBUSTNESS_DROP_CLASS.get(task)
+    if drop is None:
+        return None
+    per_class = result.get('test_per_class')
+    if not per_class or drop not in per_class:
+        return None
+    # test_per_class is a sklearn classification_report dict, so it also holds
+    # 'accuracy' / 'macro avg' / 'weighted avg' alongside the real classes.
+    scores = [v['f1-score'] for k, v in per_class.items()
+              if k != drop and isinstance(v, dict) and 'f1-score' in v
+              and not k.endswith('avg')]
+    return float(np.mean(scores)) if scores else None
+
+
 def collect(sweep_root, logger):
     """Read every run, across both directory layouts.
 
@@ -78,7 +125,7 @@ def collect(sweep_root, logger):
 
     for task in TASKS:
         for model in MODELS:
-            for frac in FRACTIONS:
+            for frac in TASK_FRACTIONS[task]:
                 frac_dir = Path(sweep_root) / task / model / f"frac{frac}"
                 paths = sorted(frac_dir.glob("lora_fine_tuning_results.json")) + \
                         sorted(frac_dir.glob("seed*/lora_fine_tuning_results.json"))
@@ -100,6 +147,7 @@ def collect(sweep_root, logger):
                         'seed': r.get('config', {}).get('seed'),
                         'test_accuracy': test.get('accuracy'),
                         'test_f1_macro': test.get('f1_macro'),
+                        'test_f1_macro_7cls': robustness_f1(r, task),
                         'test_balanced_accuracy': test.get('balanced_accuracy'),
                         'val_accuracy': val.get('accuracy'),
                         'val_f1_macro': val.get('f1_macro'),
@@ -128,6 +176,9 @@ def collect(sweep_root, logger):
                   f1_std=('test_f1_macro', lambda s: s.std(ddof=1) if len(s) > 1 else 0.0),
                   f1_min=('test_f1_macro', 'min'),
                   f1_max=('test_f1_macro', 'max'),
+                  f1_7cls_mean=('test_f1_macro_7cls', 'mean'),
+                  f1_7cls_std=('test_f1_macro_7cls',
+                               lambda s: s.std(ddof=1) if s.notna().sum() > 1 else 0.0),
                   acc_mean=('test_accuracy', 'mean'),
                   acc_std=('test_accuracy', lambda s: s.std(ddof=1) if len(s) > 1 else 0.0),
                   train_acc_mean=('final_train_acc', 'mean'))
@@ -166,9 +217,14 @@ def plot_curves(agg, out_dir, logger):
                 sub = sub.dropna(subset=[mcol])
                 if not sub.empty:
                     series[model] = dict(zip(sub['fraction'], sub[mcol]))
-                    n_max = int(sub['n_seeds'].max())
-                    label = (f"{MODEL_LABELS[model]} (n={n_max} seeds)" if n_max > 1
-                             else MODEL_LABELS[model])
+                    n_lo, n_hi = int(sub['n_seeds'].min()), int(sub['n_seeds'].max())
+                    if n_hi == 1:
+                        label = MODEL_LABELS[model]
+                    elif n_lo == n_hi:
+                        label = f"{MODEL_LABELS[model]} (n={n_hi} seeds)"
+                    else:
+                        # Ragged grid: state the range, not the maximum.
+                        label = f"{MODEL_LABELS[model]} (n={n_lo}-{n_hi} seeds)"
                     ax.plot(sub['fraction'], sub[mcol], marker='o', linewidth=2,
                             markersize=7, color=MODEL_COLORS[model],
                             label=label, zorder=3)
@@ -189,7 +245,7 @@ def plot_curves(agg, out_dir, logger):
             # at every x the higher value is labelled above, the lower below.
             # A fixed above/below-per-model rule collides wherever the curves
             # cross or run close together.
-            for frac in FRACTIONS:
+            for frac in TASK_FRACTIONS[task]:
                 present = {m: v[frac] for m, v in series.items() if frac in v}
                 if not present:
                     continue
@@ -208,9 +264,30 @@ def plot_curves(agg, out_dir, logger):
                     transform=ax.get_yaxis_transform(), ha='right', va='bottom',
                     fontsize=8, color='grey')
 
-            ax.set_xticks(FRACTIONS)
-            ax.set_xticklabels([f"{f}%" for f in FRACTIONS])
+            # Species spans 1-100%, so a linear axis crushes everything below
+            # 25% into the left margin - exactly the region the extra runs were
+            # added to resolve. Log-x only where the grid actually needs it.
+            fracs = TASK_FRACTIONS[task]
+            if max(fracs) / min(fracs) >= 20:
+                ax.set_xscale('log')
+            ax.set_xticks(fracs)
+            ax.set_xticklabels([f"{f}%" for f in fracs])
+            ax.minorticks_off()
             ax.set_xlabel("Training data fraction", fontsize=10)
+
+            # Per-point seed counts. The species grid is deliberately ragged
+            # (n=5 at 1-25%, n=1 at 50/100%), so a single "n=5 seeds" legend
+            # entry would overstate the runs behind the saturated points.
+            n_by_frac = {}
+            for model in MODELS:
+                cells = agg[(agg['task'] == task) & (agg['model'] == model)]
+                for _, cell in cells.iterrows():
+                    n_by_frac[cell['fraction']] = max(n_by_frac.get(cell['fraction'], 0),
+                                                      int(cell['n_seeds']))
+            if n_by_frac and len(set(n_by_frac.values())) > 1:
+                for frac, n in n_by_frac.items():
+                    ax.text(frac, 0.012, f"n={n}", transform=ax.get_xaxis_transform(),
+                            ha='center', va='bottom', fontsize=7, color='#444444')
             ax.set_ylabel(ylabel, fontsize=10)
             # Headroom so value labels on points near 1.0 stay inside the axes
             ax.set_ylim(0, 1.14)
@@ -265,10 +342,17 @@ def write_tables(df, agg, empty, out_dir, logger):
             sub_agg = agg[agg['task'] == task]
             if sub_agg.empty:
                 continue
+            drop = ROBUSTNESS_DROP_CLASS.get(task)
             f.write(f"## {TASK_LABELS[task]}\n\n")
-            f.write("| Model | Fraction | Seeds | Test macro-F1 | vs zero-shot | "
-                    "Test acc | vs zero-shot | F1 min-max | Mean train acc |\n")
-            f.write("|---|---|---|---|---|---|---|---|---|\n")
+            if drop:
+                f.write(f"`macro-F1 (7)` drops the `{drop}` class, which has only 2 test "
+                        f"files - one test item there is worth 0.0625 of the 8-class "
+                        f"macro-F1.\n\n")
+            f.write("| Model | Fraction | Seeds | Test macro-F1 | vs zero-shot | ")
+            if drop:
+                f.write("macro-F1 (7) | ")
+            f.write("Test acc | vs zero-shot | F1 min-max | Mean train acc |\n")
+            f.write("|---|---|---|---|---|" + ("---|" if drop else "") + "---|---|---|---|\n")
             for model in MODELS:
                 base = zero_shot_baseline(task, model)
                 rows = sub_agg[sub_agg['model'] == model].sort_values('fraction')
@@ -277,14 +361,23 @@ def write_tables(df, agg, empty, out_dir, logger):
                     d_acc = f"{r['acc_mean'] - base['accuracy']:+.4f}" if base else "-"
                     f.write(f"| {MODEL_LABELS[model]} | {int(r['fraction'])}% | "
                             f"{int(r['n_seeds'])} | "
-                            f"{r['f1_mean']:.4f} ± {r['f1_std']:.4f} | {d_f1} | "
-                            f"{r['acc_mean']:.4f} ± {r['acc_std']:.4f} | {d_acc} | "
+                            f"{r['f1_mean']:.4f} ± {r['f1_std']:.4f} | {d_f1} | ")
+                    if drop:
+                        c7 = (f"{r['f1_7cls_mean']:.4f} ± {r['f1_7cls_std']:.4f}"
+                              if pd.notna(r['f1_7cls_mean']) else "-")
+                        f.write(f"{c7} | ")
+                    f.write(f"{r['acc_mean']:.4f} ± {r['acc_std']:.4f} | {d_acc} | "
                             f"{r['f1_min']:.4f}-{r['f1_max']:.4f} | "
                             f"{r['train_acc_mean']:.4f} |\n")
                 if base:
-                    f.write(f"| *{MODEL_LABELS[model]} zero-shot* | - | - | "
-                            f"*{base['f1_macro']:.4f}* | - | *{base['accuracy']:.4f}* | "
-                            f"- | - | - |\n")
+                    # Columns: Model | Fraction | Seeds | macro-F1 | vs zs
+                    #          [| macro-F1(7)] | acc | vs zs | min-max | train acc
+                    cells = [f"*{MODEL_LABELS[model]} zero-shot*", "-", "-",
+                             f"*{base['f1_macro']:.4f}*", "-"]
+                    if drop:
+                        cells.append("-")
+                    cells += [f"*{base['accuracy']:.4f}*", "-", "-", "-"]
+                    f.write("| " + " | ".join(cells) + " |\n")
             f.write("\n")
 
         if empty:
@@ -329,8 +422,12 @@ def log_summary(agg, logger):
 
 def main():
     parser = argparse.ArgumentParser(description="Phase 3 - LoRA sweep analysis")
-    parser.add_argument("--sweep-root", default="outputs/phase3/lora_sweep")
-    parser.add_argument("--output-dir", default="outputs/phase3/lora_sweep/summary")
+    # lora_sweep_V2 is the single source of truth: it holds all 94 runs
+    # (hyrax 8 single-seed + 32 multi-seed, species 8 single-seed + 46
+    # multi-seed/low-fraction). lora_sweep_HPC is a strict 16-run subset of it,
+    # and a bare "outputs/phase3/lora_sweep" does not exist locally at all.
+    parser.add_argument("--sweep-root", default="outputs/phase3/lora_sweep_V2")
+    parser.add_argument("--output-dir", default="outputs/phase3/lora_sweep_V2/summary")
     args = parser.parse_args()
 
     log_dir = Path("outputs/phase3/logs")
