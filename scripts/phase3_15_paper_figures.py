@@ -71,6 +71,26 @@ FRACTIONS = sorted({f for v in TASK_FRACTIONS.values() for f in v})
 # check. The hyrax individual-ID task has no such class.
 ROBUSTNESS_DROP_CLASS = {"species_id": "hyrax"}
 
+# ---------------------------------------------------------------------------
+# DO NOT CONFUSE f1_7 / f1_macro_7cls WITH THE 7-CLASS SPECIES TASK.
+#
+# f1_7 here is 7 classes SCORED OUT OF AN 8-WAY MODEL: hyrax is dropped from
+# the classification report after the fact. The classifier still had 8 outputs,
+# chance was 1/8, and its encoder was adapted on hyrax audio.
+#
+# The staged-adaptation task in outputs/phase3/manifests_species7/ is a
+# different thing: a 7-OUTPUT classifier whose encoder never sees hyrax
+# (chance 1/7), with baselines in outputs/phase3/zero_shot_species7/. The two
+# are not interchangeable and must never share a column or be differenced.
+# ---------------------------------------------------------------------------
+ROBUSTNESS_CAVEAT = (
+    "f1_7 is 7 classes scored out of an 8-way model (hyrax dropped from the "
+    "report post hoc; 8 outputs, chance 1/8, encoder adapted on hyrax audio). "
+    "NOT comparable to the genuine 7-way species task in manifests_species7/ + "
+    "zero_shot_species7/ (7 outputs, chance 1/7, encoder never sees hyrax). "
+    "Different label spaces: do not same-column or delta them."
+)
+
 PROVENANCE = []
 
 
@@ -679,11 +699,24 @@ def write_csvs(out_dir, df):
             rows.append(rec)
     pd.DataFrame(rows).to_csv(out_dir / "sq2_sq3_data_efficiency.csv", index=False)
     PROVENANCE.append({"output": "sq2_sq3_data_efficiency.csv", "kind": "csv",
-                       "sources": "outputs/phase3/lora_sweep_V2/**/lora_fine_tuning_results.json"})
+                       "sources": "outputs/phase3/lora_sweep_V2/**/lora_fine_tuning_results.json",
+                       "caveat": ROBUSTNESS_CAVEAT})
 
     df.to_csv(out_dir / "sq2_sq3_per_seed_runs.csv", index=False)
     PROVENANCE.append({"output": "sq2_sq3_per_seed_runs.csv", "kind": "csv",
-                       "sources": "outputs/phase3/lora_sweep_V2/**/lora_fine_tuning_results.json"})
+                       "sources": "outputs/phase3/lora_sweep_V2/**/lora_fine_tuning_results.json",
+                       "caveat": ROBUSTNESS_CAVEAT})
+
+    # Any table carrying an f1_7 column ships the caveat beside it, so the
+    # column cannot be read out of context.
+    with open(out_dir / "F1_7_CAVEAT.txt", 'w') as f:
+        f.write("f1_7 / f1_macro_7cls columns in this directory\n")
+        f.write("=" * 60 + "\n\n")
+        f.write(ROBUSTNESS_CAVEAT + "\n\n")
+        f.write("Affected files: sq2_sq3_data_efficiency.csv, "
+                "sq2_sq3_per_seed_runs.csv\n")
+    PROVENANCE.append({"output": "F1_7_CAVEAT.txt", "kind": "note",
+                       "sources": "static", "caveat": ROBUSTNESS_CAVEAT})
 
     pc = species_per_class_table()
     if pc is not None:

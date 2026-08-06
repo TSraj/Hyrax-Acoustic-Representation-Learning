@@ -88,19 +88,41 @@ def split_individuals(individuals, train_ratio=0.8, val_ratio=0.1, seed=42):
 
 
 def create_species_id_manifest(hyrax_data, train_ids, val_ids, test_ids,
-                                phase2_manifests_dir, output_dir, logger):
+                                phase2_manifests_dir, output_dir, logger,
+                                exclude_species=()):
     """
-    Create manifest for Species ID task (8-class: 7 bird/animal species + hyrax).
+    Create manifest for the Species ID task.
+
+    Default (no exclusions) is the 8-class task: 7 bird/animal species + hyrax.
+
+    Pass exclude_species=('hyrax',) for the 7-class STAGED-ADAPTATION manifest.
+    The paper's design is staged, not parallel: the encoder is adapted on animal
+    data that EXCLUDES hyrax, then frozen and probed on hyrax as an unseen
+    target species. The 8-class manifest cannot support that claim, because its
+    hyrax class is built from outputs/phase3/hyrax_data/*_concatenated.wav -
+    i.e. all 18 individuals of the hyrax-ID task, including all 8 of the
+    session-holdout cohort (5 of them in the species TRAIN split). Any encoder
+    adapted on the 8-class manifest has already seen the audio of the very
+    individuals it is later asked to recognise.
+
+    Exclusion filters BOTH the class list and the item lists, so no file of an
+    excluded species survives in any split.
 
     Args:
-        hyrax_data: Dict of hyrax data
-        train_ids, val_ids, test_ids: Hyrax individual ID lists
+        hyrax_data: Dict of hyrax data (may be empty when hyrax is excluded)
+        train_ids, val_ids, test_ids: Hyrax individual ID lists (unused when
+            hyrax is excluded)
         phase2_manifests_dir: Phase 2 manifests directory
         output_dir: Output directory
         logger: Logger instance
+        exclude_species: Species names to drop entirely from the task
     """
+    excluded = set(exclude_species)
+
     logger.info("\n" + "=" * 80)
-    logger.info("CREATING SPECIES ID MANIFEST (8-class: 7 species + hyrax)")
+    logger.info("CREATING SPECIES ID MANIFEST")
+    if excluded:
+        logger.info(f"Excluding species: {sorted(excluded)}")
     logger.info("=" * 80)
 
     # Load Phase 2 pooled manifest (has all 7 bird/animal species)
@@ -139,14 +161,23 @@ def create_species_id_manifest(hyrax_data, train_ids, val_ids, test_ids,
     phase2_species = sorted(phase2_species)
 
     logger.info(f"\nPhase 2 species: {phase2_species}")
-    logger.info(f"Adding hyrax as 8th species")
 
-    # All species (7 + hyrax)
-    all_species = phase2_species + ['hyrax']
+    kept_phase2 = [sp for sp in phase2_species if sp not in excluded]
+    include_hyrax = 'hyrax' not in excluded
+    if include_hyrax:
+        logger.info("Adding hyrax as an additional species class")
+    else:
+        logger.info("Hyrax EXCLUDED - staged-adaptation manifest "
+                    "(encoder must not see the target species)")
+
+    all_species = kept_phase2 + (['hyrax'] if include_hyrax else [])
+    if not all_species:
+        raise ValueError("exclude_species removed every class")
     species_to_idx = {sp: idx for idx, sp in enumerate(all_species)}
 
     # Build splits
     splits = {}
+    removed_counts = defaultdict(int)
 
     for split_name in ['train', 'val', 'test']:
         items = []
@@ -166,6 +197,10 @@ def create_species_id_manifest(hyrax_data, train_ids, val_ids, test_ids,
                 if species is None:
                     species = individual.split('_')[0]
 
+                if species in excluded:
+                    removed_counts[split_name] += 1
+                    continue
+
                 items.append({
                     'file': item['file'],
                     'individual': individual,
@@ -181,13 +216,16 @@ def create_species_id_manifest(hyrax_data, train_ids, val_ids, test_ids,
         else:
             hyrax_ids = test_ids
 
-        for individual_id in hyrax_ids:
-            items.append({
-                'file': hyrax_data[individual_id]['file'],
-                'individual': individual_id,
-                'species': 'hyrax',
-                'duration': hyrax_data[individual_id]['duration']
-            })
+        if include_hyrax:
+            for individual_id in hyrax_ids:
+                items.append({
+                    'file': hyrax_data[individual_id]['file'],
+                    'individual': individual_id,
+                    'species': 'hyrax',
+                    'duration': hyrax_data[individual_id]['duration']
+                })
+        else:
+            removed_counts[split_name] += len(hyrax_ids)
 
         splits[split_name] = items
 
@@ -203,6 +241,12 @@ def create_species_id_manifest(hyrax_data, train_ids, val_ids, test_ids,
         for sp in sorted(species_counts.keys()):
             logger.info(f"    {sp}: {species_counts[sp]} files")
 
+    if excluded:
+        total_removed = sum(removed_counts.values())
+        logger.info(f"\nItems removed by exclusion {sorted(excluded)}: {total_removed} "
+                    f"(train {removed_counts['train']}, val {removed_counts['val']}, "
+                    f"test {removed_counts['test']})")
+
     # Class weights (inverse frequency based on train split)
     train_species_counts = defaultdict(int)
     for item in splits['train']:
@@ -212,11 +256,20 @@ def create_species_id_manifest(hyrax_data, train_ids, val_ids, test_ids,
     class_weights = {sp: total_train / (len(all_species) * train_species_counts[sp])
                      for sp in all_species}
 
+    n_classes = len(all_species)
+    description = f'{n_classes}-class species identification'
+    if include_hyrax:
+        description += f' ({len(kept_phase2)} bird/animal + hyrax)'
+    else:
+        description += (f' ({len(kept_phase2)} bird/animal, hyrax EXCLUDED - '
+                        'staged-adaptation manifest: the encoder is adapted here '
+                        'and then frozen and probed on hyrax as an unseen species)')
+
     # Create manifest
     manifest = {
         'task': 'species_id',
-        'description': '8-class species identification (7 bird/animal + hyrax)',
-        'num_classes': len(all_species),
+        'description': description,
+        'num_classes': n_classes,
         'species': all_species,
         'species_to_idx': species_to_idx,
         'class_weights': class_weights,
@@ -227,12 +280,28 @@ def create_species_id_manifest(hyrax_data, train_ids, val_ids, test_ids,
             'test': len(splits['test'])
         },
         'phase2_species': phase2_species,
-        'hyrax_individuals': {
-            'train': train_ids,
-            'val': val_ids,
-            'test': test_ids
-        }
+        'excluded_species': sorted(excluded),
+        'excluded_item_counts': dict(removed_counts),
+        'hyrax_individuals': ({'train': train_ids, 'val': val_ids, 'test': test_ids}
+                              if include_hyrax else
+                              {'train': [], 'val': [], 'test': []}),
+        'hyrax_individuals_removed': ({'train': train_ids, 'val': val_ids,
+                                       'test': test_ids}
+                                      if not include_hyrax else None),
     }
+
+    if not include_hyrax:
+        # Carried in the manifest so every downstream consumer sees it.
+        manifest['comparability_note'] = (
+            "Zero-shot and adaptation numbers from this manifest are GENUINE "
+            "7-WAY results: the classifier has 7 outputs and never sees hyrax. "
+            "They are NOT comparable to the 'f1_7' / 'test_f1_macro_7cls' "
+            "columns reported for the 8-class species task, which are 7 classes "
+            "SCORED OUT OF AN 8-WAY MODEL (the hyrax class is dropped after the "
+            "fact from an 8-output classifier). Different label spaces, "
+            "different chance levels (1/7 vs 1/8). Never place the two in the "
+            "same column or compute a delta between them."
+        )
 
     # Save manifest
     manifest_file = output_dir / "species_id.json"
@@ -240,6 +309,7 @@ def create_species_id_manifest(hyrax_data, train_ids, val_ids, test_ids,
         json.dump(manifest, f, indent=2)
 
     logger.info(f"\n✓ Species ID manifest saved: {manifest_file}")
+    logger.info(f"  {n_classes} classes: {all_species}")
 
     return manifest
 
@@ -786,11 +856,18 @@ def main():
     parser.add_argument("--output-dir", default="outputs/phase3/manifests",
                         help="Where manifests + concatenated wavs are written")
     parser.add_argument("--tasks", default="all",
-                        choices=["all", "session_screen", "session_ft"],
+                        choices=["all", "session_screen", "session_ft", "species_only"],
                         help="'all' = full Phase 3 set; 'session_screen' = the two "
                              "8-individual session tasks (denoiser screen); "
                              "'session_ft' = session holdout with a session-disjoint "
-                             "val split (fine-tuning)")
+                             "val split (fine-tuning); 'species_only' = just "
+                             "species_id.json, skipping all bout parsing and wav "
+                             "concatenation")
+    parser.add_argument("--exclude-species", action="append", default=[],
+                        metavar="SPECIES",
+                        help="Drop a species entirely from the species_id task "
+                             "(repeatable). Use --exclude-species hyrax to build the "
+                             "7-class staged-adaptation manifest.")
     parser.add_argument("--log-tag", default=None,
                         help="Suffix for the log file name (default: derived from audio source)")
     args = parser.parse_args()
@@ -807,6 +884,8 @@ def main():
     logger.info("PHASE 3 - STEP 2: MANIFEST CREATION")
     logger.info(f"Audio source: {args.audio_source} -> */{audio_subdir}/")
     logger.info(f"Tasks: {args.tasks}")
+    if args.exclude_species:
+        logger.info(f"Excluded species: {sorted(set(args.exclude_species))}")
     logger.info("=" * 80)
 
     # Paths
@@ -816,18 +895,25 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Parse Hyrax-ID bout labels
-    bouts_per_individual, session_profile = parse_hyrax_id_labels(
-        data_dir, logger, audio_subdir=audio_subdir
-    )
+    # Bout parsing + wav concatenation is only needed by the hyrax tasks.
+    # species_only skips it entirely (it is the slow part of this script).
+    needs_bouts = args.tasks != "species_only"
 
-    # Save session profile
-    profile = {'audio_source': args.audio_source,
-               'audio_subdir': audio_subdir,
-               'individuals': {ind: {'total_bouts': sum(sessions.values()), 'sessions': dict(sessions)}
-                               for ind, sessions in session_profile.items()}}
-    with open(output_dir / "hyrax_session_profile.json", 'w') as f:
-        json.dump(profile, f, indent=2)
+    if needs_bouts:
+        bouts_per_individual, session_profile = parse_hyrax_id_labels(
+            data_dir, logger, audio_subdir=audio_subdir
+        )
+
+        # Save session profile
+        profile = {'audio_source': args.audio_source,
+                   'audio_subdir': audio_subdir,
+                   'individuals': {ind: {'total_bouts': sum(sessions.values()), 'sessions': dict(sessions)}
+                                   for ind, sessions in session_profile.items()}}
+        with open(output_dir / "hyrax_session_profile.json", 'w') as f:
+            json.dump(profile, f, indent=2)
+    else:
+        bouts_per_individual, session_profile = {}, {}
+        logger.info("\nSkipping bout parsing and wav concatenation (species_only)")
 
     within_session_manifest = session_holdout_manifest = session_ft_manifest = None
 
@@ -850,13 +936,22 @@ def main():
             bouts_per_individual, session_profile, output_dir, logger
         )
 
-        # Load old concatenated hyrax data for species_id
+    species_manifest = None
+    if args.tasks in ("all", "species_only"):
+        # Load the concatenated hyrax data for species_id.
+        #
+        # Loaded even when hyrax is EXCLUDED, so the exclusion is provable
+        # rather than vacuous: the split assignment is reproduced with the same
+        # seed the 8-class manifest used, and those 18 items are then counted as
+        # removed instead of silently never existing. Cost is 18 get_audio_info
+        # calls - no decoding.
         hyrax_data = load_hyrax_data(hyrax_dir)
         train_ids, val_ids, test_ids = split_individuals(list(hyrax_data.keys()))
 
-        create_species_id_manifest(
+        species_manifest = create_species_id_manifest(
             hyrax_data, train_ids, val_ids, test_ids,
-            phase2_manifests_dir, output_dir, logger
+            phase2_manifests_dir, output_dir, logger,
+            exclude_species=sorted(set(args.exclude_species)),
         )
 
     # Summary
@@ -864,7 +959,8 @@ def main():
     logger.info("MANIFEST CREATION COMPLETE")
     logger.info("=" * 80)
     logger.info(f"\nOutput: {output_dir}")
-    logger.info(f"  - hyrax_session_profile.json")
+    if needs_bouts:
+        logger.info(f"  - hyrax_session_profile.json")
     if within_session_manifest is not None:
         logger.info(f"  - hyrax_id_within_session.json ({within_session_manifest['num_classes']} classes - CONTROL)")
         logger.info(f"  - hyrax_id_session_holdout.json ({session_holdout_manifest['num_classes']} classes - DIAGNOSTIC)")
@@ -872,7 +968,11 @@ def main():
         logger.info(f"  - hyrax_id_session_holdout_ft.json ({session_ft_manifest['num_classes']} classes - FINE-TUNING)")
     if hyrax_id_manifest is not None:
         logger.info(f"  - hyrax_id.json ({hyrax_id_manifest['num_classes']} classes - MAIN TASK)")
-        logger.info(f"  - species_id.json (8 classes)")
+    if species_manifest is not None:
+        logger.info(f"  - species_id.json ({species_manifest['num_classes']} classes)")
+        if species_manifest['excluded_species']:
+            logger.info(f"      excluded: {species_manifest['excluded_species']} "
+                        f"({sum(species_manifest['excluded_item_counts'].values())} items)")
     logger.info("\n✓ Ready for experiments!")
 
 

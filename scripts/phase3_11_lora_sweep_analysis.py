@@ -75,7 +75,32 @@ FRACTIONS = sorted({f for v in TASK_FRACTIONS.values() for f in v})
 # class, so the 7-class column is undefined there.
 ROBUSTNESS_DROP_CLASS = {"species_id": "hyrax"}
 
-N_CLASSES = 8  # both tasks are 8-class, so chance is the same
+# ---------------------------------------------------------------------------
+# DO NOT CONFUSE THIS COLUMN WITH THE 7-CLASS SPECIES TASK.
+#
+# 'macro-F1 (7)' / test_f1_macro_7cls here is 7 classes SCORED OUT OF AN 8-WAY
+# MODEL: the hyrax class is dropped from the classification report after the
+# fact. The classifier still had 8 outputs, chance was still 1/8, and its
+# encoder was adapted on hyrax audio.
+#
+# outputs/phase3/manifests_species7/ defines a genuinely different task: a
+# 7-OUTPUT classifier whose encoder never sees hyrax at all (chance 1/7), used
+# for the staged adaptation. Its numbers land in zero_shot_species7/ and are
+# NOT interchangeable with this column - different label space, different
+# chance level, different training data. Never place the two in one column and
+# never compute a delta between them.
+# ---------------------------------------------------------------------------
+ROBUSTNESS_CAVEAT = (
+    "`macro-F1 (7)` is 7 classes **scored out of an 8-way model** (the hyrax "
+    "class is dropped from the report after the fact; the classifier still had "
+    "8 outputs, chance 1/8, and its encoder was adapted on hyrax audio). It is "
+    "**not** comparable to the genuine 7-way species task in "
+    "`manifests_species7/` + `zero_shot_species7/`, which has a 7-output "
+    "classifier and an encoder that never sees hyrax (chance 1/7). Different "
+    "label spaces - do not same-column them or delta them."
+)
+
+N_CLASSES = 8  # both tasks here are 8-class, so chance is the same
 
 
 def zero_shot_baseline(task, model):
@@ -348,6 +373,7 @@ def write_tables(df, agg, empty, out_dir, logger):
                 f.write(f"`macro-F1 (7)` drops the `{drop}` class, which has only 2 test "
                         f"files - one test item there is worth 0.0625 of the 8-class "
                         f"macro-F1.\n\n")
+                f.write(f"> {ROBUSTNESS_CAVEAT}\n\n")
             f.write("| Model | Fraction | Seeds | Test macro-F1 | vs zero-shot | ")
             if drop:
                 f.write("macro-F1 (7) | ")
