@@ -30,6 +30,7 @@ import argparse
 import copy
 import json
 import sys
+import time
 from pathlib import Path
 
 import matplotlib
@@ -246,6 +247,10 @@ class LoRAFineTuner:
             cls = HubertModel
         else:
             raise ValueError(f"Unsupported model for LoRA fine-tuning: {self.model_name}")
+
+        # Recorded in adapter_meta.json so Phase C can load the SAME base
+        # encoder these adapters were trained against.
+        self.base_model_id = model_id
 
         self.logger.info(f"Loading {model_id}")
         self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_id)
@@ -574,6 +579,75 @@ class LoRAFineTuner:
         set_peft_model_state_dict(self.model, state['adapters'])
         self.classifier.load_state_dict(state['classifier'])
 
+    def save_adapter(self, adapter_dir, best_f1, best_epoch):
+        """Export the adapted encoder in canonical PEFT format for downstream use.
+
+        Written for the STAGED design: Phase C loads these adapters onto a fresh
+        base encoder, keeps it frozen, and probes a different task (hyrax).
+
+        Uses save_pretrained() rather than the checkpoint.pt route on purpose:
+
+          - checkpoint.pt is ~50 MB and bundles optimizer + scheduler state; it
+            exists for resume, and its layout is an internal detail of this
+            script. adapter_model.safetensors is ~5 MB (HuBERT) and is the
+            format PeftModel.from_pretrained() reads.
+          - PeftModel.from_pretrained() returns a model with ZERO trainable
+            parameters, so the frozen-encoder requirement holds by construction
+            instead of depending on a caller remembering to freeze it.
+
+        Call AFTER train(), which restores the best-epoch adapters, so what
+        lands on disk is the best checkpoint and not the last epoch.
+        """
+        adapter_dir = Path(adapter_dir)
+        adapter_dir.mkdir(parents=True, exist_ok=True)
+
+        self.model.save_pretrained(str(adapter_dir))
+
+        # The head is not used by Phase C (which trains its own probe), but it
+        # is saved so this run is reproducible end to end.
+        torch.save(self.classifier.state_dict(), adapter_dir / "classifier_head.pt")
+
+        n_trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        meta = {
+            'model': self.model_name,
+            'base_model_id': self.base_model_id,
+            'embedding_dim': self.embedding_dim,
+            'num_transformer_layers': self.model.config.num_hidden_layers,
+            # Phase C indexes output_hidden_states, which is num_layers + 1:
+            # index 0 is the pre-transformer feature_projection output and
+            # indices 1..N are the transformer blocks. Same convention as the
+            # base-model layer sweeps, so best layers are directly comparable.
+            'num_hidden_states': self.model.config.num_hidden_layers + 1,
+            'num_attention_heads': self.model.config.num_attention_heads,
+            'head_dim': self.embedding_dim // self.model.config.num_attention_heads,
+            'task': self.manifest['task'],
+            'manifest': str(self.args.manifest),
+            'num_classes': self.num_classes,
+            'class_names': self.class_names,
+            'excluded_species': self.manifest.get('excluded_species'),
+            'best_epoch': best_epoch,
+            'best_val_f1_macro': best_f1,
+            'seed': self.args.seed,
+            'data_fraction': self.args.data_fraction,
+            'trainable_params_at_save': n_trainable,
+            'lora': {'r': self.args.lora_r, 'alpha': self.args.lora_alpha,
+                     'dropout': self.args.lora_dropout,
+                     'target_modules': ["q_proj", "k_proj", "v_proj", "out_proj"],
+                     'layerdrop': self.args.layerdrop},
+            'config': vars(self.args),
+        }
+        if self.manifest.get('comparability_note'):
+            meta['comparability_note'] = self.manifest['comparability_note']
+
+        with open(adapter_dir / "adapter_meta.json", 'w') as f:
+            json.dump(meta, f, indent=2)
+
+        self.logger.info(f"\n✓ Adapter saved for staged transfer: {adapter_dir}")
+        self.logger.info(f"    files: {sorted(p.name for p in adapter_dir.iterdir())}")
+        self.logger.info(f"    best epoch {best_epoch} (val macro-F1 {best_f1:.4f}) | "
+                         f"{self.num_classes} classes | "
+                         f"hidden_states index range 0..{self.model.config.num_hidden_layers}")
+
     def _save_checkpoint(self, path, epoch, optimizer, scheduler, history,
                          best_f1, best_epoch, best_state, patience_counter):
         tmp = Path(str(path) + ".tmp")
@@ -639,6 +713,7 @@ class LoRAFineTuner:
         self.classifier.train()
 
         for epoch in range(start_epoch, self.args.max_epochs):
+            epoch_start = time.time()
             losses, correct, total = [], 0, 0
             n_batches = int(np.ceil(len(train_ds) / self.args.batch_size))
 
@@ -658,9 +733,13 @@ class LoRAFineTuner:
                 correct += (logits.argmax(dim=1) == labels).sum().item()
                 total += labels.numel()
 
+            train_seconds = time.time() - epoch_start
             val = self._evaluate(val_ds, criterion)
+            epoch_seconds = time.time() - epoch_start
             train_acc = correct / max(total, 1)
             current_lr = optimizer.param_groups[0]['lr']
+            history.setdefault('epoch_seconds', []).append(epoch_seconds)
+            history.setdefault('train_seconds', []).append(train_seconds)
 
             history['train_loss'].append(float(np.mean(losses)))
             history['train_acc'].append(train_acc)
@@ -674,7 +753,9 @@ class LoRAFineTuner:
             self.logger.info(
                 f"Epoch {epoch+1:3d} | train loss {history['train_loss'][-1]:.4f} "
                 f"| train acc {train_acc:.4f} | val acc {val['accuracy']:.4f} "
-                f"| val macro-F1 {val['f1_macro']:.4f} | lr {current_lr:.2e}"
+                f"| val macro-F1 {val['f1_macro']:.4f} | lr {current_lr:.2e} "
+                f"| {epoch_seconds/60:.1f} min "
+                f"({train_seconds/max(n_batches,1)*1000:.0f} ms/batch)"
             )
 
             stop = False
@@ -793,6 +874,18 @@ def main():
                              "~14.6k files)")
     parser.add_argument("--no-resume", action="store_true",
                         help="Ignore an existing checkpoint and start fresh")
+    # Staged transfer (Phase B/C)
+    parser.add_argument("--save-adapter-dir", default=None,
+                        help="Export the best-epoch adapters in canonical PEFT format "
+                             "(adapter_config.json + adapter_model.safetensors + "
+                             "adapter_meta.json) for a later frozen probe. Loadable "
+                             "with PeftModel.from_pretrained(), which yields zero "
+                             "trainable params.")
+    parser.add_argument("--log-tag", default=None,
+                        help="Suffix for the log filename. WITHOUT this, every run of "
+                             "a given model appends to the same "
+                             "lora_fine_tune_<model>_run.log, interleaving unrelated "
+                             "runs (the log handler opens in append mode).")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -801,6 +894,8 @@ def main():
     log_dir = Path("outputs/phase3/logs")
     log_dir.mkdir(parents=True, exist_ok=True)
     tag = "gradcheck" if args.grad_check else "run"
+    if args.log_tag:
+        tag = f"{tag}_{args.log_tag}"
     logger = setup_logger(f"Phase3_LoRA_{args.model}_{tag}",
                           log_file=str(log_dir / f"lora_fine_tune_{args.model}_{tag}.log"))
 
@@ -833,6 +928,11 @@ def main():
 
     history, best_f1, best_epoch = tuner.train(datasets)
     tuner.plot_curves(history)
+
+    # train() has restored the best-epoch adapters, so this exports the best
+    # checkpoint rather than the final epoch.
+    if args.save_adapter_dir:
+        tuner.save_adapter(args.save_adapter_dir, best_f1, best_epoch)
 
     logger.info("\n" + "=" * 80)
     logger.info("FINAL EVALUATION")
