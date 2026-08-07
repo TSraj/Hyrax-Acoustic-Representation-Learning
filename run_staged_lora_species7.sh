@@ -3,7 +3,7 @@
 #SBATCH --partition=v100
 #SBATCH --gres=gpu:v100:1
 #SBATCH --cpus-per-task=2
-#SBATCH --time=24:00:00
+#SBATCH --time=06:00:00
 #SBATCH --array=0-1%2
 #SBATCH --output=logs/staged_lora_species7_%A_%a.out
 #SBATCH --error=logs/staged_lora_species7_%A_%a.err
@@ -47,13 +47,25 @@
 # the log handler opens in APPEND mode and which already holds an unrelated
 # July hyrax run.
 #
-# WALL CLOCK. 24h matches run_phase3_lora_sweep.sh, the known-good precedent
-# for species at 100% (HuBERT ran 20 epochs, XLS-R early-stopped at 13). Each
-# epoch is checkpointed, so a task killed at the wall clock resumes from the
-# last completed epoch on resubmission:
+# WALL CLOCK. 6h, sized from the MEASURED first run rather than the original
+# 24h guess:
+#   hubert_base  4.9 min/epoch (152 ms/batch)  -> 20 ep = 1.65 h, 30 ep ~ 2.5 h
+#   xls_r       10.3 min/epoch (319 ms/batch)  -> 17 ep = 2.92 h, 30 ep ~ 5.2 h
+# 6h covers 30 epochs for either model. Each epoch is checkpointed, so a task
+# killed at the wall clock resumes from the last completed epoch:
 #   sbatch --array=1 run_staged_lora_species7.sh
-# Per-epoch wall time and ms/batch are now logged each epoch - read them off
-# the first run to size Phase C.
+#
+# OVERRIDES. MAX_EPOCHS and OUT_SUFFIX let a re-run land beside the original
+# instead of overwriting it. The first run left hubert_base at best epoch 18 of
+# a 20 max, i.e. it never early-stopped and its adapter is a FLOOR, not a
+# converged encoder - an undertrained adapter would be a confound in every
+# downstream probe. Re-run just that model, into its own directory:
+#
+#   MAX_EPOCHS=30 OUT_SUFFIX=_e30 sbatch --array=0 run_staged_lora_species7.sh
+#
+# The 20-epoch adapter stays in place until the 30-epoch one passes its gate.
+# xls_r needs no re-run: it early-stopped at 17 with best 11, so patience was
+# genuinely exhausted.
 #
 # SUBMIT:
 #   sbatch run_staged_lora_species7.sh
@@ -65,14 +77,18 @@ MODELS=("hubert_base" "xls_r")
 BASELINES=("0.8736" "0.8051")   # 7-WAY zero-shot macro-F1, Phase A step A4
 SEED=42
 FRACTION=1.0
+MAX_EPOCHS="${MAX_EPOCHS:-20}"
+OUT_SUFFIX="${OUT_SUFFIX:-}"
 
 N_JOBS=${#MODELS[@]}
 
 if [ "${1:-}" = "--list" ]; then
     echo "Job table: $N_JOBS tasks  ->  --array=0-$((N_JOBS - 1))%2"
-    printf "%5s  %-14s %-12s %s\n" "index" "model" "baseline_f1" "seed"
+    echo "MAX_EPOCHS=$MAX_EPOCHS  OUT_SUFFIX='${OUT_SUFFIX}'"
+    printf "%5s  %-14s %-12s %-6s %s\n" "index" "model" "baseline_f1" "seed" "output"
     for i in "${!MODELS[@]}"; do
-        printf "%5d  %-14s %-12s %s\n" "$i" "${MODELS[$i]}" "${BASELINES[$i]}" "$SEED"
+        printf "%5d  %-14s %-12s %-6s %s\n" "$i" "${MODELS[$i]}" "${BASELINES[$i]}" \
+            "$SEED" "outputs/phase3/staged_lora/species7/${MODELS[$i]}/seed${SEED}${OUT_SUFFIX}"
     done
     exit 0
 fi
@@ -89,7 +105,9 @@ mkdir -p logs
 
 MANIFEST="outputs/phase3/manifests_species7/species_id.json"
 CACHE_DIR="outputs/phase3/window_cache_species7"
-OUT_ROOT="outputs/staged_lora/species7"
+# Canonical location: everything else in this project lives under outputs/phase3/,
+# so the staged artefacts do too. Phase C defaults to this path.
+OUT_ROOT="outputs/phase3/staged_lora/species7"
 
 IDX=${SLURM_ARRAY_TASK_ID:-0}
 if [ "$IDX" -ge "$N_JOBS" ]; then
@@ -99,7 +117,7 @@ fi
 
 MODEL="${MODELS[$IDX]}"
 BASELINE_F1="${BASELINES[$IDX]}"
-OUT_DIR="$OUT_ROOT/$MODEL/seed${SEED}"
+OUT_DIR="$OUT_ROOT/$MODEL/seed${SEED}${OUT_SUFFIX}"
 ADAPTER_DIR="$OUT_DIR/adapter"
 
 echo "========================================"
@@ -110,6 +128,7 @@ echo "Node        : ${SLURM_NODELIST:-local}"
 echo "Model       : $MODEL"
 echo "Fraction    : $FRACTION (100%)"
 echo "Seed        : $SEED"
+echo "Max epochs  : $MAX_EPOCHS"
 echo "Manifest    : $MANIFEST  (7 classes, hyrax EXCLUDED)"
 echo "Cache       : $CACHE_DIR"
 echo "Baseline F1 : $BASELINE_F1  (7-WAY, from Phase A A4 - NOT the 8-class value)"
@@ -188,7 +207,7 @@ python scripts/phase3_10_lora_fine_tuning.py \
     --output-dir "$OUT_DIR" \
     --cache-dir "$CACHE_DIR" \
     --save-adapter-dir "$ADAPTER_DIR" \
-    --log-tag "staged_species7_${MODEL}_seed${SEED}" \
+    --log-tag "staged_species7_${MODEL}_seed${SEED}${OUT_SUFFIX}" \
     --data-fraction "$FRACTION" \
     --baseline-f1 "$BASELINE_F1" \
     --max-windows-per-file 1 \
@@ -197,7 +216,7 @@ python scripts/phase3_10_lora_fine_tuning.py \
     --head-dropout 0.3 \
     --encoder-lr 1e-4 --head-lr 1e-3 \
     --batch-size 8 \
-    --max-epochs 20 \
+    --max-epochs "$MAX_EPOCHS" \
     --patience 6 --plateau-patience 3 \
     --class-weights window_inverse \
     --seed "$SEED"
