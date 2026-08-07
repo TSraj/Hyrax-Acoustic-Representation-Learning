@@ -17,10 +17,15 @@ A converged probe on the same frozen HuBERT features reaches train macro-F1
 0.92 and test 0.3280, against a published 0.1735 (measured in Phase C).
 
 This script isolates the probe-training variable. It re-extracts features
-EXACTLY as phase3_03 does - same 5s/2.5s windowing, same final layer, same mean
-pooling, same manifest class weights - and then trains the probe at a range of
-step counts, so the trajectory from "published" to "converged" is visible.
-Nothing about the features changes; only how long the probe trains.
+EXACTLY as phase3_03 does - same final layer, same mean pooling, same manifest
+class weights, and the same per-task extraction regime - then trains the probe
+at a range of step counts, so the trajectory from "published" to "converged" is
+visible. Nothing about the features changes; only how long the probe trains.
+
+The extraction regime is per-task and must match or the comparison is void:
+hyrax tasks are windowed at 5s/2.5s, while species_id uses ONE embedding per
+file truncated to 30s (phase3_03:217). Mixing them up changes the dataset size
+about fourfold.
 
 TWO NUMBERS PER CELL
 --------------------
@@ -61,6 +66,8 @@ from src.utils.audio_utils import load_audio
 WINDOW_SECONDS = 5.0
 STRIDE_SECONDS = 2.5
 SAMPLE_RATE = 16000
+# phase3_03.extract_embedding truncates non-windowed audio to the first 30s.
+MAX_FILE_SECONDS = 30
 
 MODEL_IDS = {
     'wav2vec2_base': 'facebook/wav2vec2-base',
@@ -133,11 +140,38 @@ class Extractor:
             emb = out.last_hidden_state.mean(dim=1).squeeze(0)
         return emb.cpu().numpy()
 
-    def extract_split(self, items, class_to_idx, label_key, logger, split):
-        """Window on the fly at 5s/2.5s, exactly as phase3_03 does for hyrax."""
+    def extract_split(self, items, class_to_idx, label_key, logger, split,
+                      windowing):
+        """Extract embeddings the way phase3_03 does for this task.
+
+        phase3_03:217 sets
+
+            use_windowing = self.task in ['hyrax_id', 'hyrax_id_session_holdout']
+
+        and main() collapses every hyrax_id* task name to 'hyrax_id', so:
+
+          windowing=True   hyrax tasks. 5s windows, 2.5s stride, one embedding
+                           per window. A file shorter than one window
+                           contributes the whole file as a single embedding.
+          windowing=False  species_id. ONE embedding per FILE, audio truncated
+                           to the first 30s. NOT windowed.
+
+        Getting this wrong silently changes the dataset size by ~4x and makes
+        the replication meaningless, which is exactly what happened on the first
+        species attempt: 59572 windows extracted where phase3_03 used 14584
+        file-level embeddings, and the replication came out at 0.6075 against a
+        published 0.8736.
+
+        Failures are counted and skipped rather than raised, matching
+        phase3_03's per-item try/except. That matters for ECAPA, whose conv
+        stack rejects very short inputs - phase3_03 silently dropped those
+        files, so the faithful comparison drops them too.
+        """
         window = int(WINDOW_SECONDS * SAMPLE_RATE)
         stride = int(STRIDE_SECONDS * SAMPLE_RATE)
-        embs, labels, failed = [], [], 0
+        max_samples = int(MAX_FILE_SECONDS * SAMPLE_RATE)
+        embs, labels = [], []
+        load_failed, embed_failed = 0, 0
         t0 = time.time()
 
         for item in tqdm(items, desc=f"{split}", leave=False):
@@ -145,23 +179,40 @@ class Extractor:
                 audio, _ = load_audio(str(resolve(item['file'])),
                                       target_sr=SAMPLE_RATE, mono=True)
             except Exception:
-                failed += 1
+                load_failed += 1
                 continue
             label = class_to_idx[item[label_key]]
-            n = 0
-            for start in range(0, len(audio) - window + 1, stride):
-                embs.append(self.embed(audio[start:start + window]))
-                labels.append(label)
-                n += 1
-            if n == 0 and len(audio) > 0:
-                embs.append(self.embed(audio))
+
+            if not windowing:
+                # phase3_03.extract_embedding: truncate to 30s, one embedding.
+                chunks = [audio[:max_samples]]
+            else:
+                chunks = [audio[s:s + window]
+                          for s in range(0, len(audio) - window + 1, stride)]
+                if not chunks and len(audio) > 0:
+                    chunks = [audio]
+
+            for chunk in chunks:
+                try:
+                    embs.append(self.embed(chunk))
+                except Exception:
+                    embed_failed += 1
+                    continue
                 labels.append(label)
 
-        if failed:
-            logger.warning(f"  {split}: {failed} files failed to load")
+        if load_failed:
+            logger.warning(f"  {split}: {load_failed} files failed to load")
+        if embed_failed:
+            logger.warning(f"  {split}: {embed_failed} chunks failed to embed "
+                           f"(too short for the encoder; phase3_03 skipped these "
+                           f"too)")
+        if not embs:
+            raise RuntimeError(f"no embeddings produced for split {split}")
+
         X = np.array(embs, dtype=np.float32)
         y = np.array(labels)
-        logger.info(f"  {split}: {len(y)} windows, dim {X.shape[1]} "
+        unit = "windows" if windowing else "files"
+        logger.info(f"  {split}: {len(y)} {unit}, dim {X.shape[1]} "
                     f"({time.time() - t0:.0f}s)")
         return X, y
 
@@ -251,6 +302,10 @@ def main():
     p.add_argument("--emb-cache", default=None,
                    help="Directory to cache extracted embeddings so re-probing "
                         "does not re-extract")
+    p.add_argument("--windowing", default="auto", choices=["auto", "on", "off"],
+                   help="Mirror phase3_03: 'auto' windows hyrax_id* tasks at "
+                        "5s/2.5s and uses one 30s-truncated embedding per FILE "
+                        "for species_id. Override only to test the effect.")
     p.add_argument("--tag", default="")
     args = p.parse_args()
 
@@ -272,11 +327,21 @@ def main():
     class_names = sorted(class_to_idx, key=class_to_idx.get)
     weights = torch.FloatTensor([manifest['class_weights'][c] for c in class_names])
 
+    if args.windowing == "auto":
+        windowing = 'hyrax_id' in manifest['task']
+    else:
+        windowing = args.windowing == "on"
+
     logger.info("=" * 78)
     logger.info(f"PROBE AUDIT | {args.model} | {manifest['task']}")
     logger.info("=" * 78)
     logger.info(f"manifest: {args.manifest}")
     logger.info(f"{num_classes} classes | chance macro-F1 ~ {1/num_classes:.4f}")
+    logger.info(f"windowing: {windowing} "
+                + (f"(5s/{STRIDE_SECONDS}s stride, one embedding per window)"
+                   if windowing else
+                   f"(one embedding per FILE, truncated to {MAX_FILE_SECONDS}s)")
+                + " - matches phase3_03 for this task")
     if args.published_f1 is not None:
         logger.info(f"published test macro-F1: {args.published_f1:.4f}")
 
@@ -285,7 +350,8 @@ def main():
     if args.emb_cache:
         import hashlib
         h = hashlib.md5()
-        h.update(f"{args.model}|{args.manifest}|{WINDOW_SECONDS}|{STRIDE_SECONDS}".encode())
+        h.update(f"{args.model}|{args.manifest}|{WINDOW_SECONDS}|"
+                 f"{STRIDE_SECONDS}|win={windowing}".encode())
         cache_key = h.hexdigest()[:12]
         cache_f = Path(args.emb_cache) / f"emb_{args.model}_{cache_key}.npz"
     else:
@@ -306,7 +372,7 @@ def main():
                 continue
             feats[split] = ex.extract_split(manifest['splits'][split],
                                             class_to_idx, args.label_key,
-                                            logger, split)
+                                            logger, split, windowing)
         if cache_f is not None:
             cache_f.parent.mkdir(parents=True, exist_ok=True)
             np.savez_compressed(
@@ -415,6 +481,8 @@ def main():
         'manifest': args.manifest,
         'task': manifest['task'],
         'label_key': args.label_key,
+        'windowing': windowing,
+        'extraction_unit': 'window' if windowing else 'file (30s truncated)',
         'num_classes': num_classes,
         'chance_f1_macro': 1.0 / num_classes,
         'published_test_f1_macro': args.published_f1,
