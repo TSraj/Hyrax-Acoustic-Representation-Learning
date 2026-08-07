@@ -6,7 +6,7 @@
 #SBATCH --time=08:00:00
 #SBATCH --output=logs/probe_audit_%A_%a.out
 #SBATCH --error=logs/probe_audit_%A_%a.err
-#SBATCH --array=0-11%2
+#SBATCH --array=0-17%2
 
 # Audit of phase3_03 probe undertraining.
 #
@@ -25,9 +25,11 @@
 #
 #   tasks 0-5   denoiser screen: xls_r x {original, bioda, aca} x
 #               {within_session, session_holdout}
-#   tasks 6-11  7-way species baselines, all 6 models. Heavier than the hyrax
+#   tasks 6-11  7-way species baselines (hyrax excluded), all 6 models. Heavier than the hyrax
 #               cells: phase3_03 does NOT window species, so it is one embedding
 #               per file over 16373 files with 30s truncation.
+#   tasks 12-17 8-class species baselines (hyrax included) - the original
+#               species task, source of the 0.7194 / 0.8635 curve annotations.
 #
 # Features are re-extracted rather than loaded, because phase3_03 never saved
 # its embeddings. Extraction is cached to --emb-cache, so the probe trajectory
@@ -56,6 +58,15 @@ JOBS=(
   "species7_w2v2base       wav2vec2_base       outputs/phase3/manifests_species7/species_id.json species 0.7971"
   "species7_w2v2960h       wav2vec2_base_960h  outputs/phase3/manifests_species7/species_id.json species 0.5378"
   "species7_ecapa          ecapa_tdnn          outputs/phase3/manifests_species7/species_id.json species 0.7708"
+  # 8-class species (the ORIGINAL species task, hyrax included). Same probe, so
+  # expected to be affected the same way. These supply the 0.7194 / 0.8635
+  # baselines that annotate the LoRA sweep figures.
+  "species8_hubert         hubert_base         outputs/phase3/manifests/species_id.json species 0.8635"
+  "species8_xlsr           xls_r               outputs/phase3/manifests/species_id.json species 0.7194"
+  "species8_wavlm          wavlm               outputs/phase3/manifests/species_id.json species 0.6744"
+  "species8_w2v2base       wav2vec2_base       outputs/phase3/manifests/species_id.json species 0.7646"
+  "species8_w2v2960h       wav2vec2_base_960h  outputs/phase3/manifests/species_id.json species 0.4576"
+  "species8_ecapa          ecapa_tdnn          outputs/phase3/manifests/species_id.json species 0.7201"
 )
 N_JOBS=${#JOBS[@]}
 
