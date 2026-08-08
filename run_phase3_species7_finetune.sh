@@ -2,9 +2,10 @@
 #SBATCH --job-name=species7_ft
 #SBATCH --partition=v100
 #SBATCH --gres=gpu:v100:1
+#SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --time=24:00:00
-#SBATCH --array=0-1%2
+#SBATCH --array=0-1%1
 #SBATCH --output=logs/species7_ft_%A_%a.out
 #SBATCH --error=logs/species7_ft_%A_%a.err
 
@@ -73,6 +74,9 @@ mkdir -p logs "$OUTPUT_DIR"
 module load cuda 2>/dev/null || true
 source venv/bin/activate
 
+# reduces fragmentation, which is what turned a tight fit into an OOM
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 echo "python       : $(which python)"
 python -c "import torch; print(f'torch {torch.__version__}  cuda={torch.cuda.is_available()}  dev={torch.cuda.get_device_name(0) if torch.cuda.is_available() else None}')"
 
@@ -92,7 +96,15 @@ python scripts/phase3_23_species7_finetune.py \
 # ---------------------------------------------------------------- train
 echo ""
 echo "--- adaptation ---"
-srun python scripts/phase3_23_species7_finetune.py \
+# No srun: it launched one task PER allocated task slot, so two processes
+# landed on the same GPU and fought over its 32 GB until one OOM'd. This is a
+# single-process job; run python directly.
+#
+# --grad-checkpoint is REQUIRED, not an optimisation. Gradients must reach
+# blocks 0-3 and the conv stack, so activations for EVERY layer above them
+# (all 24 in XLS-R) stay live for the backward pass. That is strictly more
+# memory than phase2_05 ever needed, where the conv stack was frozen.
+python scripts/phase3_23_species7_finetune.py \
     --model "$MODEL" \
     --manifest "$MANIFEST" \
     --output-dir "$OUTPUT_DIR" \
@@ -101,12 +113,13 @@ srun python scripts/phase3_23_species7_finetune.py \
     --lr-conv 1e-5 \
     --lr-backbone 1e-4 \
     --lr-head 1e-3 \
-    --batch-size 8 \
+    --batch-size "${BATCH_SIZE:-8}" \
     --max-epochs 16 \
     --patience 5 \
-    --max-duration 30 \
+    --max-duration "${MAX_DURATION:-30}" \
     --num-workers 4 \
     --seed 42 \
+    --grad-checkpoint \
     --min-species-f1 0.90 \
     --no-cudnn
 

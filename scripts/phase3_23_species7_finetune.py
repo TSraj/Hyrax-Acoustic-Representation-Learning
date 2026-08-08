@@ -247,8 +247,13 @@ class StagedFineTuner:
         self.logger.info(f"Head:        {hidden} -> {self.num_classes} at lr={self.args.lr_head}")
 
         if self.args.grad_checkpoint:
-            self.backbone.gradient_checkpointing_enable()
-            self.logger.info("gradient checkpointing enabled")
+            # non-reentrant: works correctly when the segment inputs do not
+            # themselves require grad, which is the case for the frozen deep
+            # layers we still have to backprop THROUGH to reach blocks 0-3.
+            self.backbone.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
+            self.logger.info("gradient checkpointing enabled (use_reentrant=False)")
 
         trainable = sum(p.numel() for p in self.backbone.parameters() if p.requires_grad)
         total = sum(p.numel() for p in self.backbone.parameters())
