@@ -632,8 +632,11 @@ def main():
         raise SystemExit(f"manifest not found: {manifest}")
 
     tag = args.model + ("_convfrozen" if args.freeze_conv else "")
+    # adapt_species_id = adaptation supervised by SPECIES labels. The individual-ID
+    # variant writes to adapt_individual_id; keep the two apart, their checkpoints
+    # are not interchangeable.
     output_dir = Path(args.output_dir) if args.output_dir else \
-        out_root / "phase3" / "species7_finetune" / tag
+        out_root / "phase3" / "adapt_species_id" / tag
 
     logger = setup_logger("Phase3_Species7_FT", config["experiment"]["log_level"])
     logger.info("=" * 72)

@@ -23,8 +23,8 @@
 # Hyrax is EXCLUDED from the manifest and never seen during adaptation.
 #
 # OUTPUT per model:
-#   outputs/phase3/species7_finetune/<model>/checkpoints/best_model.pth
-#   outputs/phase3/species7_finetune/<model>/adaptation_summary.json
+#   outputs/phase3/$EXPERIMENT/<model>/checkpoints/best_model.pth
+#   outputs/phase3/$EXPERIMENT/<model>/adaptation_summary.json
 # The checkpoint is the input to the per-layer hyrax probe (step 3).
 #
 # NOTE ON DATA REGIME: this is the phase2_05 regime -- one sample per FILE,
@@ -41,7 +41,11 @@ PROJECT_DIR=${PROJECT_DIR:-$SLURM_SUBMIT_DIR}
 cd "$PROJECT_DIR"
 
 MANIFEST="outputs/phase3/manifests_species7/species_id.json"
-OUTPUT_DIR="outputs/phase3/species7_finetune/${MODEL}"
+# EXPERIMENT names the adaptation supervision. Species labels here; the
+# individual-ID variant sets EXPERIMENT=adapt_individual_id and a different
+# MANIFEST. Nothing else changes.
+EXPERIMENT=${EXPERIMENT:-adapt_species_id}
+OUTPUT_DIR="outputs/phase3/${EXPERIMENT}/${MODEL}"
 
 # ---------------------------------------------------------------- preflight
 echo "=============================================================="

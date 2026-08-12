@@ -247,8 +247,10 @@ def main():
 
     manifest_path = Path(args.manifest) if args.manifest else \
         out_root / "phase3" / "manifests" / "hyrax_id_session_holdout.json"
+    # one probe directory PER adaptation experiment -- the frozen "base" cells are
+    # identical across experiments and can simply be copied over to skip the GPU
     output_dir = Path(args.output_dir) if args.output_dir else \
-        out_root / "phase3" / "hyrax_layer_probe"
+        out_root / "phase3" / "hyrax_probe_adapt_species_id"
     cache_dir = Path(args.cache_dir) if args.cache_dir else output_dir / "emb_cache"
     output_dir.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)

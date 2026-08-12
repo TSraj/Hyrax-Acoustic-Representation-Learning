@@ -46,8 +46,11 @@ PROJECT_DIR=${PROJECT_DIR:-$SLURM_SUBMIT_DIR}
 cd "$PROJECT_DIR"
 
 MANIFEST="outputs/phase3/manifests/hyrax_id_session_holdout.json"
-CKPT="outputs/phase3/species7_finetune/${MODEL}/checkpoints/best_model.pth"
-OUTPUT_DIR="outputs/phase3/hyrax_layer_probe"
+# Which adaptation experiment are we probing? The frozen "base" cells are
+# identical across experiments -- copy them across instead of re-extracting.
+EXPERIMENT=${EXPERIMENT:-adapt_species_id}
+CKPT="outputs/phase3/${EXPERIMENT}/${MODEL}/checkpoints/best_model.pth"
+OUTPUT_DIR="outputs/phase3/hyrax_probe_${EXPERIMENT}"
 
 echo "=============================================================="
 echo "PHASE 3 STEP 24 - per-layer hyrax probe"

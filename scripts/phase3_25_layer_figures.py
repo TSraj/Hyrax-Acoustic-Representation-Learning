@@ -246,8 +246,9 @@ def write_csv(path, rows):
 
 def main():
     p = argparse.ArgumentParser(description="Figures for the per-layer hyrax probe")
-    p.add_argument("--in-dir", default="outputs/phase3/hyrax_layer_probe")
-    p.add_argument("--out-dir", default="outputs/phase3/hyrax_layer_probe/figures")
+    p.add_argument("--in-dir", default="outputs/phase3/hyrax_probe_adapt_species_id")
+    p.add_argument("--out-dir",
+                   default="outputs/phase3/hyrax_probe_adapt_species_id/figures")
     args = p.parse_args()
 
     out_dir = Path(args.out_dir)
