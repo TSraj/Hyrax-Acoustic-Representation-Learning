@@ -289,12 +289,15 @@ def write_csv(path, rows):
 def main():
     p = argparse.ArgumentParser(description="Figures for the per-layer hyrax probe")
     p.add_argument("--in-dir", default="outputs/phase3/hyrax_probe_adapt_species_id")
-    p.add_argument("--out-dir",
-                   default="outputs/phase3/hyrax_probe_adapt_species_id/figures")
+    # follows --in-dir. It used to be hardcoded, so passing --in-dir alone wrote
+    # every run's figures into the SAME folder and each overwrote the last.
+    p.add_argument("--out-dir", default=None,
+                   help="default: <in-dir>/figures")
     args = p.parse_args()
 
-    out_dir = Path(args.out_dir)
+    out_dir = Path(args.out_dir) if args.out_dir else Path(args.in_dir) / "figures"
     out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"figures -> {out_dir}")
 
     cells = load_cells(args.in_dir)
     if not cells:
