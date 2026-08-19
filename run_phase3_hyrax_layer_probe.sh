@@ -54,14 +54,17 @@ cd "$PROJECT_DIR"
 #
 # The probe detects start/end in the manifest and slices real bouts instead of
 # cutting 5 s windows out of concatenated audio. No flag needed.
-MANIFEST=${MANIFEST:-outputs/phase3/manifests/hyrax_id_session_holdout.json}
-
-# Which adaptation experiment are we probing? The frozen "base" cells are
-# identical across experiments -- copy them across instead of re-extracting.
-EXPERIMENT=${EXPERIMENT:-adapt_species_id}
-
-# PROBE_TAG names the output directory. Set it whenever MANIFEST changes, or
-# results from different units land on top of each other.
+# PASS THESE AS ARGUMENTS, NOT ENVIRONMENT VARIABLES:
+#
+#   sbatch run_phase3_hyrax_layer_probe.sh <manifest> <probe_tag> [experiment]
+#
+# This cluster does not propagate a `VAR=x sbatch ...` prefix into the job -- a
+# run submitted that way silently used the DEFAULT manifest and overwrote the
+# wrong output directory. Arguments always arrive. Env vars still work as a
+# fallback for anyone who has them exported.
+MANIFEST=${1:-${MANIFEST:-outputs/phase3/manifests/hyrax_id_session_holdout.json}}
+PROBE_TAG=${2:-${PROBE_TAG:-}}
+EXPERIMENT=${3:-${EXPERIMENT:-adapt_species_id}}
 PROBE_TAG=${PROBE_TAG:-$EXPERIMENT}
 
 CKPT="outputs/phase3/${EXPERIMENT}/${MODEL}/checkpoints/best_model.pth"
@@ -77,6 +80,15 @@ echo "node         : $(hostname)"
 echo "started      : $(date)"
 
 [[ -f "$MANIFEST" ]] || { echo "FATAL: manifest missing: $MANIFEST"; exit 1; }
+
+# guard against the failure that already bit us once: a different manifest
+# writing into the directory of a previous run
+if [[ "$MANIFEST" != *"hyrax_id_session_holdout.json" && "$PROBE_TAG" == "$EXPERIMENT" ]]; then
+    echo "FATAL: manifest '$MANIFEST' is not the default, but PROBE_TAG is still"
+    echo "       '$PROBE_TAG'. Results would overwrite a previous run."
+    echo "       Pass a tag:  sbatch $0 <manifest> <probe_tag>"
+    exit 1
+fi
 [[ -d "Data" ]]      || { echo "FATAL: Data/ not found"; exit 1; }
 
 CKPT_ARG=()

@@ -64,6 +64,7 @@ Embeddings are cached, so re-probing with different seeds costs no GPU time.
 """
 
 import argparse
+import hashlib
 import json
 import sys
 import time
@@ -368,7 +369,17 @@ def main():
     logger.info(f"splits:   " + ", ".join(f"{k}={len(v)}" for k, v in splits.items()))
 
     # ---------------------------------------------------------------- extract
-    cache = cache_dir / f"{cell}.npz"
+    # The cache key includes a fingerprint of the MANIFEST, not just the cell.
+    # Without it, running a bout manifest into a directory that already holds
+    # window embeddings would silently reuse the wrong features and report a
+    # confident, wrong number.
+    fp = hashlib.sha1(json.dumps(
+        {"task": manifest.get("task"),
+         "unit": manifest.get("unit", "window"),
+         "counts": {k: len(v) for k, v in splits.items()},
+         "first": splits["train"][0] if splits.get("train") else None},
+        sort_keys=True, default=str).encode()).hexdigest()[:10]
+    cache = cache_dir / f"{cell}_{fp}.npz"
     if cache.exists() and not args.force_extract:
         logger.info(f"loading cached embeddings: {cache}")
         z = np.load(cache)
