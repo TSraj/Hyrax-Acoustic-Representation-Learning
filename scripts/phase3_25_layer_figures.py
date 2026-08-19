@@ -67,6 +67,17 @@ def series(cell):
     return np.array(layers), mean, std
 
 
+def pr(cell, layer):
+    """Precision and recall for one layer, if the probe recorded them.
+
+    Recall is the one the supervisor asked for: it says how many of an animal's
+    calls were missed, which macro-F1 alone hides.
+    """
+    d = cell["layers"][str(int(layer))]
+    return (round(float(d.get("precision_macro_mean", float("nan"))), 4),
+            round(float(d.get("recall_macro_mean", float("nan"))), 4))
+
+
 def style(ax):
     ax.set_axisbelow(True)
     ax.yaxis.grid(True, color=GRID, linewidth=0.7)
@@ -119,11 +130,16 @@ def fig_per_layer(cells, models, out_png, out_csv):
                         color=colour, fontweight="bold", zorder=6)
 
             for l, m, s in zip(layers, mean, std):
+                p_, r_ = pr(cell, l)
                 rows.append({
                     "model": model, "condition": cell["condition"], "layer": int(l),
                     "layer_role": "cnn_front_end" if l == 0 else f"transformer_block_{l - 1}",
                     "f1_macro_mean": round(float(m), 4),
                     "f1_macro_std": round(float(s), 4),
+                    "precision_macro_mean": p_,
+                    "recall_macro_mean": r_,
+                    "unit": cell.get("unit", "window"),
+                    "split_by": cell.get("split_by", "session"),
                     "is_best_layer": bool(l == layers[best]),
                 })
 
@@ -172,10 +188,15 @@ def fig_best_layer(cells, models, out_png, out_csv):
             values.append(float(mean[b]))
             errs.append(float(std[b]))
             colours.append(colour)
+            p_, r_ = pr(cell, layers[b])
             rows.append({
                 "model": model, "condition": cond, "best_layer": int(layers[b]),
                 "f1_macro_mean": round(float(mean[b]), 4),
                 "f1_macro_std": round(float(std[b]), 4),
+                "precision_macro_mean": p_,
+                "recall_macro_mean": r_,
+                "unit": cell.get("unit", "window"),
+                "split_by": cell.get("split_by", "session"),
                 "chance": chance,
             })
 
@@ -235,6 +256,27 @@ def deltas(cells, models, out_csv):
     return rows
 
 
+def per_class_csv(cells, out_csv):
+    """One row per individual per cell -- who is being missed, and how often."""
+    rows = []
+    for (model, cond), cell in cells.items():
+        best = str(cell.get("best_layer"))
+        pc = cell["layers"].get(best, {}).get("per_class")
+        if not pc:
+            continue
+        for name, d in sorted(pc.items(), key=lambda kv: -kv[1]["recall"]):
+            rows.append({
+                "model": model, "condition": cond, "layer": int(best),
+                "individual": name,
+                "precision": round(d["precision"], 4),
+                "recall": round(d["recall"], 4),
+                "f1": round(d["f1"], 4),
+                "support": d["support"],
+            })
+    write_csv(out_csv, rows)
+    return rows
+
+
 def write_csv(path, rows):
     if not rows:
         return
@@ -271,8 +313,11 @@ def main():
     best = fig_best_layer(cells, models, out_dir / "hyrax_best_layer.png",
                           out_dir / "hyrax_best_layer.csv")
     dl = deltas(cells, models, out_dir / "adaptation_delta.csv")
+    pcrows = per_class_csv(cells, out_dir / "per_individual.csv")
 
     print(f"\nwrote figures + CSVs -> {out_dir}")
+    if pcrows:
+        print(f"  per_individual.csv: {len(pcrows)} rows (precision/recall per animal)")
     print("\nbest layer per cell:")
     for r in best:
         print(f"  {r['model']:<12} {r['condition']:<8} L{r['best_layer']:<3} "

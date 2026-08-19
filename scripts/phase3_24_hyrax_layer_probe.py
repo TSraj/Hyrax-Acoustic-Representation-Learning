@@ -30,9 +30,19 @@ The probe is imported from phase3_20_probe_audit, not reimplemented, so these
 numbers sit on exactly the same measurement as the corrected baselines in
 outputs/phase3/results_corrected/.
 
-WINDOWING matches phase3_03 for hyrax tasks: 5 s windows, 2.5 s stride, one
-embedding per window. Do not change it -- the corrected frozen baselines were
-measured this way and the comparison is void otherwise.
+INPUT UNIT is chosen by the manifest, per item:
+
+  bout manifests (phase3_27) carry `start`/`end`, and the exact ground-truth
+  segment is sliced at whatever length it is -- no window, no stride, long bouts
+  kept whole, one embedding per bout. This is the honest unit: it is what the
+  animal actually produced.
+
+  legacy manifests have no timings, so 5 s windows at 2.5 s stride are used,
+  matching phase3_03. Those windows span 3-4 CONCATENATED bouts with artificial
+  splices, which is why the bout manifests exist -- but the regime is preserved
+  so the published baselines stay reproducible.
+
+Do not compare the two regimes as if they measured the same task.
 
 TEST IS NEVER USED for stopping or model selection. Where the manifest has no
 val split (session-holdout does not), TRAIN is split 80/20 stratified.
@@ -57,11 +67,15 @@ import argparse
 import json
 import sys
 import time
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
 import torch
 import yaml
+from sklearn.metrics import (confusion_matrix, f1_score,
+                             precision_recall_fscore_support, precision_score,
+                             recall_score)
 from tqdm import tqdm
 
 SCRIPT_DIR = Path(__file__).parent
@@ -84,6 +98,18 @@ from phase3_20_probe_audit import (  # noqa: E402
 
 WINDOW_SECONDS = 5.0
 STRIDE_SECONDS = 2.5
+
+
+@lru_cache(maxsize=8)
+def _load_cached(path):
+    """Bout manifests reference the SAME recording dozens of times.
+
+    Without this, extracting ~3000 bouts means ~3000 full-file decodes of a
+    handful of long wavs. Manifests are emitted grouped by individual and
+    ordered by (file, start), so a small cache gets nearly every hit.
+    """
+    audio, _ = load_audio(path, target_sr=SAMPLE_RATE, mono=True)
+    return audio
 
 
 class LayerExtractor:
@@ -141,27 +167,48 @@ class LayerExtractor:
         return pooled.cpu().numpy()
 
     def extract_split(self, items, class_to_idx, split):
-        """Windowed at 5 s / 2.5 s, matching phase3_03 for hyrax tasks."""
+        """One embedding per input unit.
+
+        Two regimes, chosen per ITEM by whether the manifest carries timings:
+
+          start/end present  a bout-level manifest (phase3_27). The exact
+                             ground-truth segment is sliced at whatever length
+                             it is -- no window, no stride, long bouts kept
+                             whole. One embedding per bout.
+          start/end absent   the legacy concatenated manifests. 5 s windows at
+                             2.5 s stride, matching phase3_03, so existing
+                             results stay reproducible.
+        """
         window = int(WINDOW_SECONDS * SAMPLE_RATE)
         stride = int(STRIDE_SECONDS * SAMPLE_RATE)
 
         embs, labels = [], []
         load_failed, embed_failed = 0, 0
         t0 = time.time()
+        n_bout_items = 0
 
         for item in tqdm(items, desc=split, leave=False):
             try:
-                audio, _ = load_audio(str(resolve(item["file"])),
-                                      target_sr=SAMPLE_RATE, mono=True)
+                audio = _load_cached(str(resolve(item["file"])))
             except Exception:
                 load_failed += 1
                 continue
 
             label = class_to_idx[item["individual"]]
-            chunks = [audio[s:s + window]
-                      for s in range(0, len(audio) - window + 1, stride)]
-            if not chunks and len(audio) > 0:
-                chunks = [audio]
+
+            if "start" in item and "end" in item:
+                a = max(0, int(float(item["start"]) * SAMPLE_RATE))
+                b = min(len(audio), int(float(item["end"]) * SAMPLE_RATE))
+                if b <= a:
+                    embed_failed += 1
+                    continue
+                chunks = [audio[a:b]]
+                n_bout_items += 1
+            else:
+                chunks = [audio[s:s + window]
+                          for s in range(0, len(audio) - window + 1, stride)]
+                if not chunks and len(audio) > 0:
+                    chunks = [audio]
 
             for chunk in chunks:
                 try:
@@ -178,17 +225,40 @@ class LayerExtractor:
         if not embs:
             raise RuntimeError(f"no embeddings for split {split}")
 
-        X = np.stack(embs).astype(np.float32)  # (n_windows, n_layers, hidden)
+        X = np.stack(embs).astype(np.float32)  # (n_samples, n_layers, hidden)
         y = np.asarray(labels)
-        self.logger.info(f"  {split}: {len(y)} windows, {X.shape[1]} layers, "
+        unit = "bouts" if n_bout_items else "windows"
+        self.logger.info(f"  {split}: {len(y)} {unit}, {X.shape[1]} layers, "
                          f"dim {X.shape[2]} ({time.time() - t0:.0f}s)")
         return X, y
 
 
+def predict(clf, X, device):
+    clf.eval()
+    with torch.no_grad():
+        return clf(torch.FloatTensor(X).to(device)).argmax(dim=1).cpu().numpy()
+
+
+def macro_pr(y_true, y_pred):
+    """Precision and recall alongside F1.
+
+    Recall answers 'how many of this individual's calls did we miss', precision
+    answers 'when we said it was this individual, how often were we right'. F1
+    alone hides which of the two is failing.
+    """
+    return {
+        "precision_macro": float(precision_score(y_true, y_pred, average="macro",
+                                                 zero_division=0)),
+        "recall_macro": float(recall_score(y_true, y_pred, average="macro",
+                                           zero_division=0)),
+        "f1_macro": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
+    }
+
+
 def probe_layer(train_X, train_y, test_X, test_y, num_classes, weights,
-                device, seeds, steps, patience, val_frac):
+                device, seeds, steps, patience, val_frac, classes=None):
     """Converged probe, one run per seed. Test never touches selection."""
-    runs = []
+    runs, last_pred = [], None
     for seed in seeds:
         keep, held = stratified_split(train_y, val_frac, seed)
         clf, best_step = fit_probe(
@@ -197,22 +267,43 @@ def probe_layer(train_X, train_y, test_X, test_y, num_classes, weights,
             patience=patience, seed=seed,
         )
         res = evaluate(clf, test_X, test_y, device)
+        last_pred = predict(clf, test_X, device)
+        res.update(macro_pr(test_y, last_pred))
         res["train_f1_macro"] = evaluate(clf, train_X[keep], train_y[keep], device)["f1_macro"]
         res["best_step"] = best_step
         res["seed"] = seed
         runs.append(res)
 
-    f1s = [r["f1_macro"] for r in runs]
-    return {
-        "f1_macro_mean": float(np.mean(f1s)),
-        "f1_macro_std": float(np.std(f1s)),
-        "f1_macro_runs": f1s,
-        "train_f1_macro_mean": float(np.mean([r["train_f1_macro"] for r in runs])),
-        "accuracy_mean": float(np.mean([r["accuracy"] for r in runs])),
-        "balanced_accuracy_mean": float(np.mean([r["balanced_accuracy"] for r in runs])),
-        "best_step_mean": float(np.mean([r["best_step"] for r in runs])),
+    def m(k):
+        return float(np.mean([r[k] for r in runs]))
+
+    out = {
+        "f1_macro_mean": m("f1_macro"),
+        "f1_macro_std": float(np.std([r["f1_macro"] for r in runs])),
+        "f1_macro_runs": [r["f1_macro"] for r in runs],
+        "precision_macro_mean": m("precision_macro"),
+        "recall_macro_mean": m("recall_macro"),
+        "train_f1_macro_mean": m("train_f1_macro"),
+        "accuracy_mean": m("accuracy"),
+        "balanced_accuracy_mean": m("balanced_accuracy"),
+        "best_step_mean": m("best_step"),
         "runs": runs,
     }
+
+    # per-individual breakdown from the last seed: which animals are being
+    # missed, and how they are confused
+    if classes is not None and last_pred is not None:
+        p, r, f, s = precision_recall_fscore_support(
+            test_y, last_pred, labels=list(range(num_classes)), zero_division=0)
+        out["per_class"] = {
+            classes[i]: {"precision": float(p[i]), "recall": float(r[i]),
+                         "f1": float(f[i]), "support": int(s[i])}
+            for i in range(num_classes)
+        }
+        out["confusion_matrix"] = confusion_matrix(
+            test_y, last_pred, labels=list(range(num_classes))).tolist()
+
+    return out
 
 
 def main():
@@ -311,16 +402,27 @@ def main():
             train_X[:, layer, :], train_y, test_X[:, layer, :], test_y,
             num_classes, weights, device, seeds,
             args.probe_steps, args.probe_patience, args.val_frac,
+            classes=classes,
         )
         results[str(layer)] = r
         tag = "CNN front-end" if layer == 0 else f"block {layer - 1}"
         logger.info(f"  layer {layer:>2} ({tag:<13}) "
-                    f"test F1 {r['f1_macro_mean']:.4f} +- {r['f1_macro_std']:.4f}   "
+                    f"F1 {r['f1_macro_mean']:.4f} +- {r['f1_macro_std']:.4f}  "
+                    f"P {r['precision_macro_mean']:.4f}  "
+                    f"R {r['recall_macro_mean']:.4f}   "
                     f"train F1 {r['train_f1_macro_mean']:.4f}")
 
     best = max(results.items(), key=lambda kv: kv[1]["f1_macro_mean"])
-    logger.info(f"\nBEST layer {best[0]}: {best[1]['f1_macro_mean']:.4f} "
-                f"+- {best[1]['f1_macro_std']:.4f}")
+    logger.info(f"\nBEST layer {best[0]}: F1 {best[1]['f1_macro_mean']:.4f} "
+                f"+- {best[1]['f1_macro_std']:.4f}  "
+                f"precision {best[1]['precision_macro_mean']:.4f}  "
+                f"recall {best[1]['recall_macro_mean']:.4f}")
+    if "per_class" in best[1]:
+        logger.info("  per individual (last seed):")
+        for name, pc in sorted(best[1]["per_class"].items(),
+                               key=lambda kv: -kv[1]["recall"]):
+            logger.info(f"    {name:<10} P {pc['precision']:.3f}  R {pc['recall']:.3f}  "
+                        f"F1 {pc['f1']:.3f}  n={pc['support']}")
 
     summary = {
         "model": args.model,
@@ -339,10 +441,14 @@ def main():
             "val_frac": args.val_frac,
             "selection": "early stopping on internal split of train; test never used",
         },
-        "n_train_windows": int(len(train_y)),
-        "n_test_windows": int(len(test_y)),
+        "unit": manifest.get("unit", "window"),
+        "split_by": manifest.get("split_by", "session"),
+        "n_train": int(len(train_y)),
+        "n_test": int(len(test_y)),
         "best_layer": int(best[0]),
         "best_f1_macro": best[1]["f1_macro_mean"],
+        "best_precision_macro": best[1]["precision_macro_mean"],
+        "best_recall_macro": best[1]["recall_macro_mean"],
         "layers": results,
     }
 
