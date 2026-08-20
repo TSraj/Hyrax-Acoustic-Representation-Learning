@@ -51,6 +51,11 @@ export HF_HOME=${HF_HOME:-$WORK/hf_cache/huggingface}
 export ESP_CACHE_HOME=${ESP_CACHE_HOME:-$WORK/hf_cache/esp}
 mkdir -p "$HF_HOME" "$ESP_CACHE_HOME"
 
+# HuggingFace serves large files through Xet (cas-server.xethub.hf.co), which
+# this cluster's compute nodes cannot reach -- small .py files download fine,
+# then the weights fail with "CAS Client Error". Fall back to the classic CDN.
+export HF_HUB_DISABLE_XET=${HF_HUB_DISABLE_XET:-1}
+
 echo "=============================================================="
 echo "AVES 2 (EAT) PRE-DOWNLOAD"
 echo "=============================================================="

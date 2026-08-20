@@ -55,6 +55,8 @@ if [[ -z "${WORK:-}" ]]; then
 fi
 export HF_HOME=${HF_HOME:-$WORK/hf_cache/huggingface}
 export ESP_CACHE_HOME=${ESP_CACHE_HOME:-$WORK/hf_cache/esp}
+# see the pre-download script: Xet's CAS server is unreachable from compute nodes
+export HF_HUB_DISABLE_XET=${HF_HUB_DISABLE_XET:-1}
 
 MODEL=aves2_eat_bio
 OUT_ROOT="outputs/phase3/aves2_zeroshot"
