@@ -48,7 +48,19 @@ MODEL_LABEL = {
     "wav2vec2_base": "wav2vec2",
     "wavlm": "WavLM",
     "wav2vec2_base_960h": "wav2vec2-960h",
+    "aves2_eat_bio": "AVES 2 EAT (bio-pretrained)",
 }
+
+# Index 0 is not the same quantity in every architecture. The waveform models
+# put their CNN feature extractor there; AVES 2 is a spectrogram transformer
+# whose index 0 is a mel-patch embedding. Labelling both "CNN front-end" would
+# assert a correspondence that does not exist.
+AVEX_MODELS = {"aves2_eat_bio"}
+
+
+def layer0_label(models):
+    kinds = {"patch embed" if m in AVEX_MODELS else "CNN front-end" for m in models}
+    return " / ".join(sorted(kinds))
 
 
 def load_cells(in_dir):
@@ -160,9 +172,13 @@ def fig_per_layer(cells, models, out_png, out_csv):
         style(ax)
         ax.legend(frameon=False, fontsize=9, loc="upper right", ncol=2)
 
-    axes[-1].set_xlabel("Layer   (0 = CNN front-end, 1+ = transformer blocks)",
-                        fontsize=10, color=INK)
-    fig.suptitle("Where hyrax identity lives, and whether species adaptation moves it",
+    axes[-1].set_xlabel(f"Layer   (0 = {layer0_label(models)}, "
+                        f"1+ = transformer blocks)", fontsize=10, color=INK)
+    # a zero-shot-only run has no adapted cells, so promising a comparison the
+    # figure does not contain would misdescribe it
+    has_adapted = any(cond == "adapted" for _, cond in cells)
+    fig.suptitle("Where hyrax identity lives, and whether species adaptation moves it"
+                 if has_adapted else "Where hyrax identity lives (frozen encoders)",
                  fontsize=13, fontweight="bold", color=INK, x=0.012, ha="left")
     fig.tight_layout(rect=(0, 0, 1, 0.965))
     fig.savefig(out_png, dpi=300, bbox_inches="tight", facecolor="white")

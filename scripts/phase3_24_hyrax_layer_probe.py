@@ -100,6 +100,57 @@ from phase3_20_probe_audit import (  # noqa: E402
 WINDOW_SECONDS = 5.0
 STRIDE_SECONDS = 2.5
 
+# Models that do NOT load through HuggingFace and need the phase3_28 wrapper.
+# Kept separate from MODEL_IDS on purpose: MODEL_IDS maps to HF ids and is
+# consumed by phase3_20's own Extractor, which would try
+# Wav2Vec2Model.from_pretrained on anything it finds there.
+AVEX_MODELS = {"aves2_eat_bio"}
+ALL_MODELS = sorted(set(MODEL_IDS) | AVEX_MODELS)
+
+
+def build_extractor(model_name, checkpoint, logger, pooling="masked_mean",
+                    pad_mode="zero", batch_size=16):
+    """Pick the loader for this model family. HF models are unchanged."""
+    if model_name in AVEX_MODELS:
+        from phase3_28_avex_extractor import AvesLayerExtractor
+        return AvesLayerExtractor(model_name, checkpoint, logger,
+                                  pooling=pooling, pad_mode=pad_mode,
+                                  batch_size=batch_size)
+    return LayerExtractor(model_name, checkpoint, logger)
+
+
+def layer_tag(model_name, layer):
+    """Index 0 means different things across architectures -- say which."""
+    if layer != 0:
+        return f"block {layer - 1}"
+    return "patch embed" if model_name in AVEX_MODELS else "CNN front-end"
+
+
+def chunks_for_item(item, audio, window, stride):
+    """The INPUT UNIT for one manifest entry -> (chunks, is_bout).
+
+    Single source of truth, shared by every extractor. The AVES wrapper batches
+    its forward passes and so cannot reuse LayerExtractor.extract_split
+    directly; routing both through this function is what guarantees the two
+    paths slice audio identically, rather than "identically as far as anyone
+    checked".
+
+      start/end present  bout manifest (phase3_27): the exact ground-truth
+                         segment, whatever length it is. No window, no stride.
+      start/end absent   legacy manifests: 5 s windows at 2.5 s stride, the
+                         phase3_03 regime the published baselines used.
+    """
+    if "start" in item and "end" in item:
+        a = max(0, int(float(item["start"]) * SAMPLE_RATE))
+        b = min(len(audio), int(float(item["end"]) * SAMPLE_RATE))
+        return ([] if b <= a else [audio[a:b]]), True
+
+    chunks = [audio[s:s + window]
+              for s in range(0, len(audio) - window + 1, stride)]
+    if not chunks and len(audio) > 0:
+        chunks = [audio]
+    return chunks, False
+
 
 @lru_cache(maxsize=8)
 def _load_cached(path):
@@ -197,19 +248,11 @@ class LayerExtractor:
 
             label = class_to_idx[item["individual"]]
 
-            if "start" in item and "end" in item:
-                a = max(0, int(float(item["start"]) * SAMPLE_RATE))
-                b = min(len(audio), int(float(item["end"]) * SAMPLE_RATE))
-                if b <= a:
-                    embed_failed += 1
-                    continue
-                chunks = [audio[a:b]]
-                n_bout_items += 1
-            else:
-                chunks = [audio[s:s + window]
-                          for s in range(0, len(audio) - window + 1, stride)]
-                if not chunks and len(audio) > 0:
-                    chunks = [audio]
+            chunks, is_bout = chunks_for_item(item, audio, window, stride)
+            if not chunks:
+                embed_failed += 1
+                continue
+            n_bout_items += int(is_bout)
 
             for chunk in chunks:
                 try:
@@ -309,7 +352,7 @@ def probe_layer(train_X, train_y, test_X, test_y, num_classes, weights,
 
 def main():
     p = argparse.ArgumentParser(description="Per-layer hyrax probe, base vs adapted")
-    p.add_argument("--model", required=True, choices=sorted(MODEL_IDS))
+    p.add_argument("--model", required=True, choices=ALL_MODELS)
     p.add_argument("--condition", required=True, choices=["base", "adapted"])
     p.add_argument("--checkpoint", default=None,
                    help="required when --condition adapted")
@@ -327,10 +370,27 @@ def main():
     p.add_argument("--layers", default=None,
                    help="comma-separated subset, e.g. 0,1,2 (default: all)")
     p.add_argument("--force-extract", action="store_true")
+
+    # avex-only knobs. Ignored by the HF models, whose pooling is unchanged.
+    p.add_argument("--pooling", default="masked_mean",
+                   choices=["masked_mean", "unmasked_mean", "cls"],
+                   help="AVES only. masked_mean is the primary setting; the "
+                        "others exist for sensitivity checks and are tagged "
+                        "into the output filename so they cannot overwrite it.")
+    p.add_argument("--pad-mode", default="zero", choices=["zero", "tile"],
+                   help="AVES only. zero = real bout + padding (primary). "
+                        "tile = repeat the bout to fill the 10.24s canvas, "
+                        "which is a DIFFERENT stimulus and is a sensitivity "
+                        "check only.")
+    p.add_argument("--batch-size", type=int, default=16,
+                   help="AVES only; the canvas is fixed so batching is free.")
     args = p.parse_args()
 
     if args.condition == "adapted" and not args.checkpoint:
         raise SystemExit("--condition adapted requires --checkpoint")
+    if args.model in AVEX_MODELS and args.condition == "adapted":
+        raise SystemExit(f"{args.model} is evaluated ZERO-SHOT only; there is "
+                         f"no adapted AVES cell in this experiment.")
 
     root = SCRIPT_DIR.parent
     with open(root / "config" / "config.yaml") as f:
@@ -349,6 +409,16 @@ def main():
 
     logger = setup_logger("Phase3_HyraxLayerProbe", config["experiment"]["log_level"])
     cell = f"{args.model}_{args.condition}"
+    # A sensitivity run must never land on the primary result's filename or its
+    # embedding cache, so any non-default pooling/padding is tagged into the cell.
+    if args.model in AVEX_MODELS:
+        variant = []
+        if args.pooling != "masked_mean":
+            variant.append(args.pooling)
+        if args.pad_mode != "zero":
+            variant.append(args.pad_mode)
+        if variant:
+            cell += "_" + "_".join(variant)
 
     logger.info("=" * 72)
     logger.info(f"PER-LAYER HYRAX PROBE - {cell}")
@@ -380,17 +450,24 @@ def main():
          "first": splits["train"][0] if splits.get("train") else None},
         sort_keys=True, default=str).encode()).hexdigest()[:10]
     cache = cache_dir / f"{cell}_{fp}.npz"
+    extractor_provenance = None
     if cache.exists() and not args.force_extract:
         logger.info(f"loading cached embeddings: {cache}")
         z = np.load(cache)
         train_X, train_y, test_X, test_y = z["train_X"], z["train_y"], z["test_X"], z["test_y"]
         logger.info(f"  train {train_X.shape}  test {test_X.shape}")
     else:
-        extractor = LayerExtractor(
-            args.model, args.checkpoint if args.condition == "adapted" else None, logger
+        extractor = build_extractor(
+            args.model, args.checkpoint if args.condition == "adapted" else None,
+            logger, pooling=args.pooling, pad_mode=args.pad_mode,
+            batch_size=args.batch_size,
         )
         train_X, train_y = extractor.extract_split(splits["train"], class_to_idx, "train")
         test_X, test_y = extractor.extract_split(splits["test"], class_to_idx, "test")
+        if hasattr(extractor, "provenance"):
+            extractor_provenance = extractor.provenance()
+        if hasattr(extractor, "close"):
+            extractor.close()
         np.savez_compressed(cache, train_X=train_X, train_y=train_y,
                             test_X=test_X, test_y=test_y)
         logger.info(f"cached embeddings -> {cache}")
@@ -416,7 +493,7 @@ def main():
             classes=classes,
         )
         results[str(layer)] = r
-        tag = "CNN front-end" if layer == 0 else f"block {layer - 1}"
+        tag = layer_tag(args.model, layer)
         logger.info(f"  layer {layer:>2} ({tag:<13}) "
                     f"F1 {r['f1_macro_mean']:.4f} +- {r['f1_macro_std']:.4f}  "
                     f"P {r['precision_macro_mean']:.4f}  "
@@ -462,6 +539,9 @@ def main():
         "best_recall_macro": best[1]["recall_macro_mean"],
         "layers": results,
     }
+    if extractor_provenance is not None:
+        summary["extractor"] = extractor_provenance
+        summary["layer0_is_cnn_frontend"] = args.model not in AVEX_MODELS
 
     out_path = output_dir / f"layer_probe_{cell}.json"
     with open(out_path, "w") as f:
