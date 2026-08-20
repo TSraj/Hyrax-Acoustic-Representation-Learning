@@ -102,7 +102,11 @@ if [[ ! -x "$AVEX_VENV/bin/python" ]]; then
     # newest wheels are cu130 and ship no kernels for Volta (V100 = sm_70) --
     # they install fine and then refuse to run on this cluster's GPUs. The
     # cu121 build of 2.5.1 covers sm_70 and clears avex's floor.
-    pip install torch==2.5.1 torchvision==0.20.1 \
+    # All THREE must come from the same CUDA build. torchaudio is a compiled
+    # extension linked against a specific libcudart, so a torch/torchaudio
+    # mismatch fails at import with "libcudart.so.NN: cannot open shared
+    # object file" -- long before any model loads.
+    pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
         --index-url https://download.pytorch.org/whl/cu121
     pip install avex
     # repo-side deps used by phase3_24 / _28 / _29
