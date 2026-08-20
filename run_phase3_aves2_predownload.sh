@@ -83,6 +83,11 @@ module load cuda 2>/dev/null || true
 # is not a meaningful source of difference.
 AVEX_VENV=${AVEX_VENV:-$WORK/venv_avex}
 
+# pip caches downloaded wheels in ~/.cache/pip by default. The torch wheels
+# alone are several GB, which lands straight on a quota-limited HOME.
+export PIP_CACHE_DIR=${PIP_CACHE_DIR:-$WORK/pip_cache}
+mkdir -p "$PIP_CACHE_DIR"
+
 if [[ ! -x "$AVEX_VENV/bin/python" ]]; then
     echo "creating AVES venv at $AVEX_VENV (one-off, a few minutes)"
     python -m venv "$AVEX_VENV"
@@ -98,8 +103,14 @@ else
     source "$AVEX_VENV/bin/activate"
 fi
 
-python -c "import torch, avex; print(f'avex venv: torch {torch.__version__}, avex {avex.version.__version__ if hasattr(avex,\"version\") else \"?\"}')" \
-    || { echo "FATAL: avex venv is not usable"; exit 1; }
+# Keep this check to what actually matters: both packages import. Anything
+# fancier (reaching for avex's version attribute) risks failing on a cosmetic
+# detail and killing a job whose environment is perfectly fine.
+python - <<'PYEOF' || { echo "FATAL: avex venv is not usable"; exit 1; }
+import torch
+import avex
+print(f"avex venv OK: torch {torch.__version__}, avex imported")
+PYEOF
 
 python -u - <<'PYEOF'
 import time
