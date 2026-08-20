@@ -98,8 +98,12 @@ if [[ ! -x "$AVEX_VENV/bin/python" ]]; then
     python -m venv "$AVEX_VENV"
     source "$AVEX_VENV/bin/activate"
     pip install --upgrade pip -q
-    # let pip pick a consistent torch/torchvision pair >= avex's floor
-    pip install "torch>=2.5" torchvision
+    # Pin the CUDA build, not just the version. avex needs torch>=2.5, but the
+    # newest wheels are cu130 and ship no kernels for Volta (V100 = sm_70) --
+    # they install fine and then refuse to run on this cluster's GPUs. The
+    # cu121 build of 2.5.1 covers sm_70 and clears avex's floor.
+    pip install torch==2.5.1 torchvision==0.20.1 \
+        --index-url https://download.pytorch.org/whl/cu121
     pip install avex
     # repo-side deps used by phase3_24 / _28 / _29
     pip install numpy scipy scikit-learn librosa soundfile pyyaml tqdm transformers

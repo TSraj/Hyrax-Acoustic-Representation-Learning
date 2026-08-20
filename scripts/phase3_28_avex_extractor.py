@@ -225,7 +225,22 @@ class AvesLayerExtractor:
         shim_eat_for_transformers5(logger)
         from avex import load_model
 
+        # avex resolves the weights from an hf:// URI and calls a REMOTE
+        # exists() on it before ever consulting its local cache
+        # (avex/models/utils/load.py:537). On a compute node with no outbound
+        # internet that either hangs until the connect timeout or, under
+        # HF_HUB_OFFLINE, fails outright with "Checkpoint not found" -- even
+        # though the file is sitting in ESP_CACHE_HOME.
+        #
+        # So when the cached file is already present, hand avex the local path
+        # and skip the network entirely. The cache name is a sha256 of the
+        # source URI, hence deterministic across machines.
+        local_ckpt = self._cached_checkpoint()
+        if local_ckpt is not None:
+            logger.info(f"using cached weights, no network: {local_ckpt}")
+
         self.model = load_model(AVEX_MODEL_ID, device=self.device,
+                                checkpoint_path=local_ckpt,
                                 return_features_only=True)
         for p in self.model.parameters():
             p.requires_grad = False
@@ -252,6 +267,27 @@ class AvesLayerExtractor:
                     f"NOT a waveform CNN front-end), 1..{N_BLOCKS} = blocks")
         logger.info(f"  canvas {CANVAS_SECONDS:.2f}s, grid {TIME_COLS}x{FREQ_ROWS}, "
                     f"pooling={pooling}, pad_mode={pad_mode}, batch={batch_size}")
+
+    @staticmethod
+    def _cached_checkpoint():
+        """Local path to the already-downloaded AVES weights, or None.
+
+        Mirrors avex's own cache naming: ESP_CACHE_HOME (default ~/.cache/esp)
+        holding a file named from the first 16 hex of sha256(source_uri).
+        """
+        import hashlib
+        import os
+
+        root = Path(os.environ.get("ESP_CACHE_HOME", Path.home() / ".cache" / "esp"))
+        uri = f"hf://EarthSpeciesProject/{AVEX_MODEL_ID.replace('_', '-')}/" \
+              f"{AVEX_MODEL_ID.replace('_', '-')}.safetensors"
+        digest = hashlib.sha256(uri.encode("utf-8")).hexdigest()[:16]
+        path = root / f"{AVEX_MODEL_ID.replace('_', '-')}-{digest}.safetensors"
+        if path.exists():
+            return str(path)
+        # fall back to any matching file, in case the naming scheme shifts
+        hits = sorted(root.glob(f"{AVEX_MODEL_ID.replace('_', '-')}-*.safetensors"))
+        return str(hits[0]) if hits else None
 
     def _make_hook(self, name):
         def hook(_module, _inputs, output):
