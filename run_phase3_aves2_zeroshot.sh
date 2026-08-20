@@ -55,8 +55,14 @@ if [[ -z "${WORK:-}" ]]; then
 fi
 export HF_HOME=${HF_HOME:-$WORK/hf_cache/huggingface}
 export ESP_CACHE_HOME=${ESP_CACHE_HOME:-$WORK/hf_cache/esp}
-# see the pre-download script: Xet's CAS server is unreachable from compute nodes
+# Compute nodes on this cluster have no outbound internet: a stray network call
+# does not fail, it hangs until the connect timeout. Force cache-only so any
+# missing artefact is an immediate, readable error instead of a stall.
 export HF_HUB_DISABLE_XET=${HF_HUB_DISABLE_XET:-1}
+export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
+export TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
+# stop avex re-validating its cached weights over the network
+export ESP_CACHE_VALIDATE_TTL_SECONDS=${ESP_CACHE_VALIDATE_TTL_SECONDS:--1}
 
 MODEL=aves2_eat_bio
 OUT_ROOT="outputs/phase3/aves2_zeroshot"
