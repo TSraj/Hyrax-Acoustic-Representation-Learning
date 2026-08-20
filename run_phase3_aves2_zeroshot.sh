@@ -94,7 +94,16 @@ echo ""
 mkdir -p logs "$OUTPUT_DIR"
 
 module load cuda 2>/dev/null || true
-source venv/bin/activate
+
+# AVES runs in its own venv: avex needs torch>=2.5 and the project venv is
+# older, which we deliberately do not upgrade. Built by the pre-download job.
+AVEX_VENV=${AVEX_VENV:-$WORK/venv_avex}
+if [[ ! -x "$AVEX_VENV/bin/python" ]]; then
+    echo "FATAL: AVES venv missing at $AVEX_VENV"
+    echo "       Run run_phase3_aves2_predownload.sh first."
+    exit 1
+fi
+source "$AVEX_VENV/bin/activate"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 python -c "import torch; print(f'torch {torch.__version__}  cuda={torch.cuda.is_available()}')"

@@ -70,26 +70,36 @@ df -h "$WORK" | tail -1
 echo ""
 
 module load cuda 2>/dev/null || true
-source venv/bin/activate
 
-# avex requires torch>=2.5 and torchvision>=0.17. Installing avex bare lets pip
-# resolve torchvision to its newest build, which DRAGS TORCH FORWARD -- and every
-# existing result in this repo was measured on the currently installed torch.
-# Pin torchvision to the build matching the installed torch instead.
-python - <<'PYEOF'
-import importlib.util, subprocess, sys
-if importlib.util.find_spec("avex") is None:
-    import torch
-    major_minor = ".".join(torch.__version__.split("+")[0].split(".")[:2])
-    # torch 2.x <-> torchvision 0.(x+15)
-    tv = f"0.{int(major_minor.split('.')[1]) + 15}.0"
-    print(f"installing avex with torchvision=={tv} to hold torch at {torch.__version__}",
-          flush=True)
-    subprocess.check_call([sys.executable, "-m", "pip", "install",
-                           f"torchvision=={tv}", "avex"])
-else:
-    print("avex already installed", flush=True)
-PYEOF
+# ---------------------------------------------------------------- venv
+# avex requires torch>=2.5. The project venv is older than that, and upgrading
+# it in place would change the torch underneath every already-published number
+# in this repo. So AVES gets its OWN venv, on $WORK (a torch install is ~3 GB
+# and HOME is quota-limited). The project venv is never touched.
+#
+# The AVES results are a separate output tree that recomputes none of the
+# existing cells, so an isolated environment costs nothing in comparability
+# beyond the probe itself -- a full-batch linear fit, where the torch version
+# is not a meaningful source of difference.
+AVEX_VENV=${AVEX_VENV:-$WORK/venv_avex}
+
+if [[ ! -x "$AVEX_VENV/bin/python" ]]; then
+    echo "creating AVES venv at $AVEX_VENV (one-off, a few minutes)"
+    python -m venv "$AVEX_VENV"
+    source "$AVEX_VENV/bin/activate"
+    pip install --upgrade pip -q
+    # let pip pick a consistent torch/torchvision pair >= avex's floor
+    pip install "torch>=2.5" torchvision
+    pip install avex
+    # repo-side deps used by phase3_24 / _28 / _29
+    pip install numpy scipy scikit-learn librosa soundfile pyyaml tqdm transformers
+else
+    echo "reusing AVES venv at $AVEX_VENV"
+    source "$AVEX_VENV/bin/activate"
+fi
+
+python -c "import torch, avex; print(f'avex venv: torch {torch.__version__}, avex {avex.version.__version__ if hasattr(avex,\"version\") else \"?\"}')" \
+    || { echo "FATAL: avex venv is not usable"; exit 1; }
 
 python -u - <<'PYEOF'
 import time
