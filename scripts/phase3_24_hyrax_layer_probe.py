@@ -99,6 +99,8 @@ from phase3_20_probe_audit import (  # noqa: E402
 
 WINDOW_SECONDS = 5.0
 STRIDE_SECONDS = 2.5
+# phase3_03.extract_embedding truncates non-windowed audio to the first 30 s
+MAX_FILE_SECONDS = 30
 
 # Models that do NOT load through HuggingFace and need the phase3_28 wrapper.
 # Kept separate from MODEL_IDS on purpose: MODEL_IDS maps to HF ids and is
@@ -126,7 +128,7 @@ def layer_tag(model_name, layer):
     return "patch embed" if model_name in AVEX_MODELS else "CNN front-end"
 
 
-def chunks_for_item(item, audio, window, stride):
+def chunks_for_item(item, audio, window, stride, per_file=False):
     """The INPUT UNIT for one manifest entry -> (chunks, is_bout).
 
     Single source of truth, shared by every extractor. The AVES wrapper batches
@@ -135,11 +137,21 @@ def chunks_for_item(item, audio, window, stride):
     paths slice audio identically, rather than "identically as far as anyone
     checked".
 
+      per_file=True      SPECIES manifests: ONE embedding per file, truncated
+                         to the first 30 s. This is phase3_03:217's
+                         non-windowed branch and must not be windowed -- the
+                         published species numbers (XLS-R 0.969, HuBERT 0.962)
+                         were measured this way, and windowing changes the
+                         dataset size about fourfold.
       start/end present  bout manifest (phase3_27): the exact ground-truth
                          segment, whatever length it is. No window, no stride.
       start/end absent   legacy manifests: 5 s windows at 2.5 s stride, the
                          phase3_03 regime the published baselines used.
     """
+    if per_file:
+        return ([] if len(audio) == 0
+                else [audio[:int(MAX_FILE_SECONDS * SAMPLE_RATE)]]), False
+
     if "start" in item and "end" in item:
         a = max(0, int(float(item["start"]) * SAMPLE_RATE))
         b = min(len(audio), int(float(item["end"]) * SAMPLE_RATE))
@@ -218,21 +230,24 @@ class LayerExtractor:
             pooled = torch.stack([h.mean(dim=1).squeeze(0) for h in out.hidden_states])
         return pooled.cpu().numpy()
 
-    def extract_split(self, items, class_to_idx, split):
-        """One embedding per input unit.
+    def extract_split(self, items, class_to_idx, split, label_key="individual"):
+        """One embedding per input unit. THREE regimes, chosen automatically:
 
-        Two regimes, chosen per ITEM by whether the manifest carries timings:
-
-          start/end present  a bout-level manifest (phase3_27). The exact
-                             ground-truth segment is sliced at whatever length
-                             it is -- no window, no stride, long bouts kept
-                             whole. One embedding per bout.
-          start/end absent   the legacy concatenated manifests. 5 s windows at
-                             2.5 s stride, matching phase3_03, so existing
-                             results stay reproducible.
+          start/end in the item   bout-level hyrax manifest (phase3_27). The
+                                  exact GT segment, whatever its length.
+          label_key == 'species'  ONE embedding per FILE, truncated to the first
+                                  30 s -- phase3_03:217's non-windowed branch.
+                                  This must not be windowed: the published
+                                  species numbers (XLS-R 0.969, HuBERT 0.962)
+                                  were measured this way, and windowing changes
+                                  the dataset size about fourfold.
+          otherwise               legacy concatenated hyrax manifests: 5 s
+                                  windows at 2.5 s stride.
         """
         window = int(WINDOW_SECONDS * SAMPLE_RATE)
         stride = int(STRIDE_SECONDS * SAMPLE_RATE)
+        max_file = int(MAX_FILE_SECONDS * SAMPLE_RATE)
+        per_file = label_key == "species"
 
         embs, labels = [], []
         load_failed, embed_failed = 0, 0
@@ -246,9 +261,9 @@ class LayerExtractor:
                 load_failed += 1
                 continue
 
-            label = class_to_idx[item["individual"]]
+            label = class_to_idx[item[label_key]]
 
-            chunks, is_bout = chunks_for_item(item, audio, window, stride)
+            chunks, is_bout = chunks_for_item(item, audio, window, stride, per_file)
             if not chunks:
                 embed_failed += 1
                 continue
@@ -271,7 +286,7 @@ class LayerExtractor:
 
         X = np.stack(embs).astype(np.float32)  # (n_samples, n_layers, hidden)
         y = np.asarray(labels)
-        unit = "bouts" if n_bout_items else "windows"
+        unit = "files" if per_file else ("bouts" if n_bout_items else "windows")
         self.logger.info(f"  {split}: {len(y)} {unit}, {X.shape[1]} layers, "
                          f"dim {X.shape[2]} ({time.time() - t0:.0f}s)")
         return X, y
@@ -427,7 +442,13 @@ def main():
     with open(manifest_path) as f:
         manifest = json.load(f)
 
-    classes = manifest["individuals"]
+    # species manifests key on 'species', hyrax manifests on 'individual'
+    if "species" in manifest and "species_to_idx" in manifest:
+        label_key = "species"
+        classes = manifest["species"]
+    else:
+        label_key = "individual"
+        classes = manifest["individuals"]
     class_to_idx = {c: i for i, c in enumerate(classes)}
     num_classes = len(classes)
     weights = torch.FloatTensor([manifest["class_weights"][c] for c in classes])
@@ -445,7 +466,8 @@ def main():
     # confident, wrong number.
     fp = hashlib.sha1(json.dumps(
         {"task": manifest.get("task"),
-         "unit": manifest.get("unit", "window"),
+         "unit": manifest.get("unit", "file" if label_key == "species" else "window"),
+        "label_key": label_key,
          "counts": {k: len(v) for k, v in splits.items()},
          "first": splits["train"][0] if splits.get("train") else None},
         sort_keys=True, default=str).encode()).hexdigest()[:10]
@@ -462,8 +484,10 @@ def main():
             logger, pooling=args.pooling, pad_mode=args.pad_mode,
             batch_size=args.batch_size,
         )
-        train_X, train_y = extractor.extract_split(splits["train"], class_to_idx, "train")
-        test_X, test_y = extractor.extract_split(splits["test"], class_to_idx, "test")
+        train_X, train_y = extractor.extract_split(splits["train"], class_to_idx,
+                                                   "train", label_key)
+        test_X, test_y = extractor.extract_split(splits["test"], class_to_idx,
+                                                 "test", label_key)
         if hasattr(extractor, "provenance"):
             extractor_provenance = extractor.provenance()
         if hasattr(extractor, "close"):
@@ -529,7 +553,8 @@ def main():
             "val_frac": args.val_frac,
             "selection": "early stopping on internal split of train; test never used",
         },
-        "unit": manifest.get("unit", "window"),
+        "unit": manifest.get("unit", "file" if label_key == "species" else "window"),
+        "label_key": label_key,
         "split_by": manifest.get("split_by", "session"),
         "n_train": int(len(train_y)),
         "n_test": int(len(test_y)),
