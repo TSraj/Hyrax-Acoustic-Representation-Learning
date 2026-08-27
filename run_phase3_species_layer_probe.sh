@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:v100:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --time=24:00:00
+#SBATCH --time=08:00:00
 #SBATCH --array=0-5%1
 #SBATCH --output=logs/species_layers_%A_%a.out
 #SBATCH --error=logs/species_layers_%A_%a.err
@@ -46,9 +46,22 @@
 #
 # COST: 18,162 files, roughly 34 hours of audio -- about 26x the bout set.
 # Expect ~1 h per base-sized cell (HuBERT, WavLM, wav2vec2) and ~3 h per XLS-R
-# cell, so ~10 h across the six. The 24 h limit is PER ARRAY TASK, not for the
-# set, so every cell has roughly 8x headroom; %1 only serialises them. Each cell
-# caches its embeddings, so re-running one is cheap.
+# cell, so ~10 h across the six. The limit is PER ARRAY TASK, not for the set.
+#
+# 8 h rather than 24 h on purpose: the cluster was fully allocated and a 24 h
+# request is far harder for the scheduler to backfill into a gap, so it sat in
+# PD (Priority) for hours. 8 h is still ~2.7x the worst cell estimate.
+#
+# RESUME. Nothing is lost to a timeout:
+#   - each SPLIT caches separately, written atomically, so a cell killed during
+#     the test split keeps its train extraction
+#   - a cell whose result JSON exists exits in seconds
+# So a later job simply continues. Submit a chain with:
+#
+#   ./submit_species_layers_chain.sh 3
+#
+# and the links cover each other. Cells are independent, so a single failure can
+# also be redone alone with:  sbatch --array=3 run_phase3_species_layer_probe.sh
 
 set -euo pipefail
 

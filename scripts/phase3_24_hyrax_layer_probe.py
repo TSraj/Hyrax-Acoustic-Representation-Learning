@@ -385,6 +385,8 @@ def main():
     p.add_argument("--layers", default=None,
                    help="comma-separated subset, e.g. 0,1,2 (default: all)")
     p.add_argument("--force-extract", action="store_true")
+    p.add_argument("--force", action="store_true",
+                   help="re-probe even if the result JSON already exists")
 
     # avex-only knobs. Ignored by the HF models, whose pooling is unchanged.
     p.add_argument("--pooling", default="masked_mean",
@@ -436,8 +438,14 @@ def main():
             cell += "_" + "_".join(variant)
 
     logger.info("=" * 72)
-    logger.info(f"PER-LAYER HYRAX PROBE - {cell}")
+    logger.info(f"PER-LAYER PROBE - {cell}")
     logger.info("=" * 72)
+
+    result_path = output_dir / f"layer_probe_{cell}.json"
+    if result_path.exists() and not args.force_extract and not args.force:
+        logger.info(f"result already exists: {result_path}")
+        logger.info("nothing to do -- pass --force to redo it")
+        return
 
     with open(manifest_path) as f:
         manifest = json.load(f)
@@ -471,30 +479,57 @@ def main():
          "counts": {k: len(v) for k, v in splits.items()},
          "first": splits["train"][0] if splits.get("train") else None},
         sort_keys=True, default=str).encode()).hexdigest()[:10]
-    cache = cache_dir / f"{cell}_{fp}.npz"
+    # PER-SPLIT caches, not one combined file. A cell that dies extracting the
+    # test split used to lose the train split too, because nothing was written
+    # until both finished. Species extraction is hours long, so that mattered:
+    # the next job in the chain now reuses whatever completed.
+    cache_train = cache_dir / f"{cell}_{fp}_train.npz"
+    cache_test = cache_dir / f"{cell}_{fp}_test.npz"
+    legacy_cache = cache_dir / f"{cell}_{fp}.npz"
+
     extractor_provenance = None
-    if cache.exists() and not args.force_extract:
-        logger.info(f"loading cached embeddings: {cache}")
-        z = np.load(cache)
+    extractor = None
+
+    def _extractor():
+        """Built once, and only if something actually needs extracting."""
+        nonlocal extractor
+        if extractor is None:
+            extractor = build_extractor(
+                args.model, args.checkpoint if args.condition == "adapted" else None,
+                logger, pooling=args.pooling, pad_mode=args.pad_mode,
+                batch_size=args.batch_size,
+            )
+        return extractor
+
+    def load_or_extract(split_name, cache_path):
+        if cache_path.exists() and not args.force_extract:
+            logger.info(f"reusing cached {split_name}: {cache_path.name}")
+            z = np.load(cache_path)
+            return z["X"], z["y"]
+        X, y = _extractor().extract_split(splits[split_name], class_to_idx,
+                                          split_name, label_key)
+        tmp = cache_path.with_suffix(".tmp.npz")
+        np.savez_compressed(tmp, X=X, y=y)
+        tmp.replace(cache_path)      # atomic: a kill mid-write leaves no half file
+        logger.info(f"cached {split_name} -> {cache_path.name}")
+        return X, y
+
+    if legacy_cache.exists() and not args.force_extract:
+        # a cache written before the split was separated
+        logger.info(f"loading combined cache: {legacy_cache.name}")
+        z = np.load(legacy_cache)
         train_X, train_y, test_X, test_y = z["train_X"], z["train_y"], z["test_X"], z["test_y"]
-        logger.info(f"  train {train_X.shape}  test {test_X.shape}")
     else:
-        extractor = build_extractor(
-            args.model, args.checkpoint if args.condition == "adapted" else None,
-            logger, pooling=args.pooling, pad_mode=args.pad_mode,
-            batch_size=args.batch_size,
-        )
-        train_X, train_y = extractor.extract_split(splits["train"], class_to_idx,
-                                                   "train", label_key)
-        test_X, test_y = extractor.extract_split(splits["test"], class_to_idx,
-                                                 "test", label_key)
+        train_X, train_y = load_or_extract("train", cache_train)
+        test_X, test_y = load_or_extract("test", cache_test)
+
+    if extractor is not None:
         if hasattr(extractor, "provenance"):
             extractor_provenance = extractor.provenance()
         if hasattr(extractor, "close"):
             extractor.close()
-        np.savez_compressed(cache, train_X=train_X, train_y=train_y,
-                            test_X=test_X, test_y=test_y)
-        logger.info(f"cached embeddings -> {cache}")
+
+    logger.info(f"  train {train_X.shape}  test {test_X.shape}")
 
     n_layers = train_X.shape[1]
     layer_ids = ([int(x) for x in args.layers.split(",")] if args.layers
