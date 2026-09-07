@@ -70,13 +70,57 @@ SAMPLE_RATE = 16000
 MAX_FILE_SECONDS = 30
 
 MODEL_IDS = {
+    # ---- the original six, unchanged. Every published number uses these ----
     'wav2vec2_base': 'facebook/wav2vec2-base',
     'wav2vec2_base_960h': 'facebook/wav2vec2-base-960h',
     'hubert_base': 'facebook/hubert-base-ls960',
     'xls_r': 'facebook/wav2vec2-xls-r-300m',
     'wavlm': 'microsoft/wavlm-base-plus',
     'ecapa_tdnn': 'speechbrain/spkrec-ecapa-voxceleb',
+
+    # ---- expansion, 2026-09. Grouped by the axis each one isolates. ----
+    # MONOLINGUAL
+    'hubert_large': 'facebook/hubert-large-ll60k',          # size vs hubert_base
+    'wavlm_large': 'microsoft/wavlm-large',                 # best speaker model on SUPERB
+    'data2vec_base': 'facebook/data2vec-audio-base',        # self-distillation objective
+    'unispeech_sat': 'microsoft/unispeech-sat-base-plus',   # speaker-aware pretraining
+    # MULTILINGUAL
+    'mhubert_147': 'utter-project/mHuBERT-147',             # multilingual vs hubert_base
+    'mms_300m': 'facebook/mms-300m',                        # 1400+ langs, xls_r's size
+    'xls_r_1b': 'facebook/wav2vec2-xls-r-1b',               # scale vs xls_r (300m)
+    # BIOACOUSTIC models do NOT live here -- they load via avex, not HuggingFace.
+    # See AVEX_MODELS in phase3_24.
 }
+
+# Which transformers class loads each checkpoint. Anything absent defaults to
+# Wav2Vec2Model, which is correct for the wav2vec2/XLS-R/MMS family regardless
+# of whether the repo advertises ForPreTraining or ForCTC (the head is dropped).
+#
+# Kept as ONE map imported by phase3_24 rather than duplicated there. Two
+# hand-maintained copies would eventually disagree, and the failure mode is
+# silent: a model loaded through the wrong class still returns hidden states,
+# just from randomly initialised weights.
+MODEL_CLASS_NAMES = {
+    'hubert_base': 'HubertModel',
+    'hubert_large': 'HubertModel',
+    'mhubert_147': 'HubertModel',
+    'wavlm': 'WavLMModel',
+    'wavlm_large': 'WavLMModel',
+    'data2vec_base': 'Data2VecAudioModel',
+    'unispeech_sat': 'UniSpeechSatModel',
+}
+
+# No per-layer hidden states: one embedding per input, so these get a single
+# row in the results rather than a layer profile.
+SINGLE_EMBEDDING_MODELS = {'ecapa_tdnn'}
+
+
+def model_class(model_name):
+    """-> the transformers class for this checkpoint (Wav2Vec2Model default)."""
+    import transformers
+    return getattr(transformers, MODEL_CLASS_NAMES.get(model_name, 'Wav2Vec2Model'))
+
+
 DEFAULT_STEPS = [50, 100, 200, 500, 1000, 2000, 5000]
 
 
@@ -109,10 +153,8 @@ class Extractor:
                 source=model_id, savedir="pretrained_models/ecapa_tdnn")
             self.feature_extractor = None
         else:
-            from transformers import (Wav2Vec2FeatureExtractor, Wav2Vec2Model,
-                                      HubertModel, WavLMModel)
-            cls = {'hubert_base': HubertModel, 'wavlm': WavLMModel}.get(
-                model_name, Wav2Vec2Model)
+            from transformers import Wav2Vec2FeatureExtractor
+            cls = model_class(model_name)
             self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_id)
             self.model = cls.from_pretrained(model_id, use_safetensors=True)
             self.model.config.layerdrop = 0.0

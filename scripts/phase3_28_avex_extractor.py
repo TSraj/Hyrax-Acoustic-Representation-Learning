@@ -87,7 +87,20 @@ SCRIPT_DIR = Path(__file__).parent
 sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(SCRIPT_DIR.parent))
 
-AVEX_MODEL_ID = "esp_aves2_eat_bio"
+# Our model key -> the avex registry id. BOTH are the `eat_hf` architecture
+# (verified against avex.list_models()), so every geometry constant below --
+# canvas, patch grid, block count, layer map -- holds for either. They differ
+# only in pretraining corpus: `bio` is bioacoustic-only, `all` is the full
+# mixture. That pair is the point: it isolates pretraining data with the
+# architecture fixed.
+#
+# A model on a DIFFERENT avex backbone (effnetb0, beats) must NOT be added
+# here -- the layer map and the 64x8 patch grid would both be wrong, and the
+# module-name check in __init__ is what would catch it.
+AVEX_MODEL_IDS = {
+    "aves2_eat_bio": "esp_aves2_eat_bio",
+    "aves2_eat_all": "esp_aves2_eat_all",
+}
 EAT_REMOTE_REPO = "worstchan/EAT-base_epoch30_pretrain"
 
 SAMPLE_RATE = 16000
@@ -209,6 +222,13 @@ class AvesLayerExtractor:
             raise ValueError(f"unknown pooling: {pooling}")
         if pad_mode not in {"zero", "tile"}:
             raise ValueError(f"unknown pad_mode: {pad_mode}")
+        if model_name not in AVEX_MODEL_IDS:
+            raise ValueError(
+                f"{model_name} is not an EAT-backbone avex model. This wrapper "
+                f"hardcodes the EAT geometry (10.24s canvas, 64x8 patch grid, "
+                f"12 blocks); known: {sorted(AVEX_MODEL_IDS)}"
+            )
+        self.avex_model_id = AVEX_MODEL_IDS[model_name]
 
         self.logger = logger
         self.pooling = pooling
@@ -235,11 +255,11 @@ class AvesLayerExtractor:
         # So when the cached file is already present, hand avex the local path
         # and skip the network entirely. The cache name is a sha256 of the
         # source URI, hence deterministic across machines.
-        local_ckpt = self._cached_checkpoint()
+        local_ckpt = self._cached_checkpoint(self.avex_model_id)
         if local_ckpt is not None:
             logger.info(f"using cached weights, no network: {local_ckpt}")
 
-        self.model = load_model(AVEX_MODEL_ID, device=self.device,
+        self.model = load_model(self.avex_model_id, device=self.device,
                                 checkpoint_path=local_ckpt,
                                 return_features_only=True)
         for p in self.model.parameters():
@@ -261,7 +281,7 @@ class AvesLayerExtractor:
             for name in LAYER_MODULES
         ]
 
-        logger.info(f"{model_name} (avex {AVEX_MODEL_ID}) on {self.device}: "
+        logger.info(f"{model_name} (avex {self.avex_model_id}) on {self.device}: "
                     f"{self.num_layers} layers, dim {self.hidden_size}")
         logger.info(f"  0 = patch embedding (pre-transformer, mel patches -- "
                     f"NOT a waveform CNN front-end), 1..{N_BLOCKS} = blocks")
@@ -269,7 +289,7 @@ class AvesLayerExtractor:
                     f"pooling={pooling}, pad_mode={pad_mode}, batch={batch_size}")
 
     @staticmethod
-    def _cached_checkpoint():
+    def _cached_checkpoint(avex_model_id):
         """Local path to the already-downloaded AVES weights, or None.
 
         Mirrors avex's own cache naming: ESP_CACHE_HOME (default ~/.cache/esp)
@@ -279,14 +299,14 @@ class AvesLayerExtractor:
         import os
 
         root = Path(os.environ.get("ESP_CACHE_HOME", Path.home() / ".cache" / "esp"))
-        uri = f"hf://EarthSpeciesProject/{AVEX_MODEL_ID.replace('_', '-')}/" \
-              f"{AVEX_MODEL_ID.replace('_', '-')}.safetensors"
+        slug = avex_model_id.replace("_", "-")
+        uri = f"hf://EarthSpeciesProject/{slug}/{slug}.safetensors"
         digest = hashlib.sha256(uri.encode("utf-8")).hexdigest()[:16]
-        path = root / f"{AVEX_MODEL_ID.replace('_', '-')}-{digest}.safetensors"
+        path = root / f"{slug}-{digest}.safetensors"
         if path.exists():
             return str(path)
         # fall back to any matching file, in case the naming scheme shifts
-        hits = sorted(root.glob(f"{AVEX_MODEL_ID.replace('_', '-')}-*.safetensors"))
+        hits = sorted(root.glob(f"{slug}-*.safetensors"))
         return str(hits[0]) if hits else None
 
     def _make_hook(self, name):
@@ -365,12 +385,15 @@ class AvesLayerExtractor:
             (0, self.num_layers, self.hidden_size), dtype=np.float32)
 
     def extract_split(self, items, class_to_idx, split, label_key="individual"):
-        """One embedding per input unit -> (X, y), X = (n, num_layers, hidden).
+        """One embedding per input unit -> (X, y, g), X = (n, num_layers, hidden).
 
         The chunking rules come from phase3_24.chunks_for_item, NOT from a copy
         living here, so the bout/window semantics cannot drift away from the
         path the other six models take. The only difference is that chunks are
         collected and forwarded in batches, which the fixed canvas makes free.
+
+        `g` is the source recording per row, for score-level aggregation. It is
+        appended in the same loop as the label, so the two cannot desynchronise.
         """
         import time
 
@@ -383,7 +406,7 @@ class AvesLayerExtractor:
         window = int(WINDOW_SECONDS * SAMPLE_RATE)
         stride = int(STRIDE_SECONDS * SAMPLE_RATE)
 
-        pending, labels = [], []
+        pending, labels, groups = [], [], []
         load_failed, skipped, n_bout_items = 0, 0, 0
         t0 = time.time()
 
@@ -404,6 +427,7 @@ class AvesLayerExtractor:
             for chunk in chunks:
                 pending.append(chunk)
                 labels.append(label)
+                groups.append(item["file"])
 
         if load_failed:
             self.logger.warning(f"  {split}: {load_failed} files failed to load")
@@ -414,20 +438,22 @@ class AvesLayerExtractor:
 
         X = self.embed_many(pending).astype(np.float32)
         y = np.asarray(labels)
+        g = np.asarray(groups)
         unit = "bouts" if n_bout_items else "windows"
-        self.logger.info(f"  {split}: {len(y)} {unit}, {X.shape[1]} layers, "
+        self.logger.info(f"  {split}: {len(y)} {unit} from {len(set(groups))} "
+                         f"recordings, {X.shape[1]} layers, "
                          f"dim {X.shape[2]} ({time.time() - t0:.0f}s)")
         if self.n_cropped:
             self.logger.warning(
                 f"  {self.n_cropped} input(s) exceeded the {CANVAS_SECONDS:.2f}s "
                 f"canvas and were start-cropped")
-        return X, y
+        return X, y, g
 
     def provenance(self):
         """Recorded into every result JSON so the run is self-describing."""
         return {
             "loader": "avex",
-            "avex_model_id": AVEX_MODEL_ID,
+            "avex_model_id": self.avex_model_id,
             "backbone_repo": EAT_REMOTE_REPO,
             "sample_rate": SAMPLE_RATE,
             "canvas_seconds": CANVAS_SECONDS,

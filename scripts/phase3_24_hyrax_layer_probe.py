@@ -91,8 +91,10 @@ from src.utils.logging_utils import setup_logger  # noqa: E402
 from phase3_20_probe_audit import (  # noqa: E402
     MODEL_IDS,
     SAMPLE_RATE,
+    SINGLE_EMBEDDING_MODELS,
     evaluate,
     fit_probe,
+    model_class,
     resolve,
     stratified_split,
 )
@@ -106,7 +108,7 @@ MAX_FILE_SECONDS = 30
 # Kept separate from MODEL_IDS on purpose: MODEL_IDS maps to HF ids and is
 # consumed by phase3_20's own Extractor, which would try
 # Wav2Vec2Model.from_pretrained on anything it finds there.
-AVEX_MODELS = {"aves2_eat_bio"}
+AVEX_MODELS = {"aves2_eat_bio", "aves2_eat_all"}
 ALL_MODELS = sorted(set(MODEL_IDS) | AVEX_MODELS)
 
 
@@ -118,11 +120,15 @@ def build_extractor(model_name, checkpoint, logger, pooling="masked_mean",
         return AvesLayerExtractor(model_name, checkpoint, logger,
                                   pooling=pooling, pad_mode=pad_mode,
                                   batch_size=batch_size)
+    if model_name in SINGLE_EMBEDDING_MODELS:
+        return EcapaExtractor(model_name, checkpoint, logger)
     return LayerExtractor(model_name, checkpoint, logger)
 
 
 def layer_tag(model_name, layer):
     """Index 0 means different things across architectures -- say which."""
+    if model_name in SINGLE_EMBEDDING_MODELS:
+        return "utterance emb"
     if layer != 0:
         return f"block {layer - 1}"
     return "patch embed" if model_name in AVEX_MODELS else "CNN front-end"
@@ -180,15 +186,16 @@ class LayerExtractor:
     """Mean-pooled embedding from every layer, one forward pass per window."""
 
     def __init__(self, model_name, checkpoint, logger):
-        from transformers import (HubertModel, Wav2Vec2FeatureExtractor,
-                                  Wav2Vec2Model, WavLMModel)
+        from transformers import Wav2Vec2FeatureExtractor
 
         self.logger = logger
         self.device = ("cuda" if torch.cuda.is_available()
                        else "mps" if torch.backends.mps.is_available() else "cpu")
 
         model_id = MODEL_IDS[model_name]
-        cls = {"hubert_base": HubertModel, "wavlm": WavLMModel}.get(model_name, Wav2Vec2Model)
+        # shared with phase3_20 so the two scripts cannot drift onto different
+        # classes for the same checkpoint
+        cls = model_class(model_name)
 
         self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_id)
         self.model = cls.from_pretrained(model_id, use_safetensors=True)
@@ -231,7 +238,15 @@ class LayerExtractor:
         return pooled.cpu().numpy()
 
     def extract_split(self, items, class_to_idx, split, label_key="individual"):
-        """One embedding per input unit. THREE regimes, chosen automatically:
+        """One embedding per input unit -> (X, y, g).
+
+        `g` is the SOURCE RECORDING each row came from. It exists so score-level
+        aggregation can average a probe's per-bout scores over the bouts of one
+        recording. Without it the row-to-recording link is gone by the time the
+        probe runs, and grouping would have to be inferred from row order --
+        which is only correct while nothing is ever dropped.
+
+        THREE regimes, chosen automatically:
 
           start/end in the item   bout-level hyrax manifest (phase3_27). The
                                   exact GT segment, whatever its length.
@@ -249,7 +264,7 @@ class LayerExtractor:
         max_file = int(MAX_FILE_SECONDS * SAMPLE_RATE)
         per_file = label_key == "species"
 
-        embs, labels = [], []
+        embs, labels, groups = [], [], []
         load_failed, embed_failed = 0, 0
         t0 = time.time()
         n_bout_items = 0
@@ -276,6 +291,9 @@ class LayerExtractor:
                     embed_failed += 1
                     continue
                 labels.append(label)
+                # appended in lockstep with the embedding, INSIDE the try's
+                # success path, so a dropped chunk can never shift the mapping
+                groups.append(item["file"])
 
         if load_failed:
             self.logger.warning(f"  {split}: {load_failed} files failed to load")
@@ -286,10 +304,65 @@ class LayerExtractor:
 
         X = np.stack(embs).astype(np.float32)  # (n_samples, n_layers, hidden)
         y = np.asarray(labels)
+        g = np.asarray(groups)
         unit = "files" if per_file else ("bouts" if n_bout_items else "windows")
-        self.logger.info(f"  {split}: {len(y)} {unit}, {X.shape[1]} layers, "
+        self.logger.info(f"  {split}: {len(y)} {unit} from {len(set(groups))} "
+                         f"recordings, {X.shape[1]} layers, "
                          f"dim {X.shape[2]} ({time.time() - t0:.0f}s)")
-        return X, y
+        return X, y, g
+
+
+class EcapaExtractor(LayerExtractor):
+    """ECAPA-TDNN: ONE utterance embedding, not a layer profile.
+
+    ECAPA is the most relevant baseline in the set -- it is the only encoder
+    here purpose-built for speaker identity -- but it is a SpeechBrain
+    EncoderClassifier with no `hidden_states` interface. Its channels are
+    aggregated by attentive statistics pooling into a single 192-d vector, and
+    there is no stack of per-block outputs comparable to a transformer's.
+
+    So it is modelled as a ONE-LAYER encoder: `num_layers == 1` and
+    `embed_all_layers` returns shape (1, 192). Everything downstream -- the
+    per-layer loop, best-layer selection, the per-individual breakdown -- then
+    works untouched and simply finds one layer. `single_embedding` is recorded
+    in the summary so a reader cannot mistake "best layer 0" here for the
+    "layer 0 = CNN front-end" finding that applies to the wav2vec2 family.
+
+    extract_split is INHERITED, not reimplemented, so ECAPA slices bouts
+    through exactly the same code path as every other model.
+    """
+
+    def __init__(self, model_name, checkpoint, logger):
+        if checkpoint is not None:
+            raise ValueError(
+                "ECAPA is evaluated zero-shot only: there is no species-adapted "
+                "ECAPA checkpoint in this experiment."
+            )
+        from speechbrain.inference.speaker import EncoderClassifier
+
+        self.logger = logger
+        # SpeechBrain's MPS support is patchy; CUDA or CPU only.
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        model_id = MODEL_IDS[model_name]
+        self.model = EncoderClassifier.from_hparams(
+            source=model_id, savedir="pretrained_models/ecapa_tdnn",
+            run_opts={"device": self.device},
+        )
+        self.feature_extractor = None
+        self.num_layers = 1
+        logger.info(f"{model_name} on {self.device}: single 192-d utterance "
+                    f"embedding (attentive stat pooling) -- NO layer profile")
+
+    def embed_all_layers(self, audio):
+        """-> (1, hidden). Mirrors phase3_20.Extractor.embed's ECAPA branch."""
+        with torch.no_grad():
+            e = self.model.encode_batch(
+                torch.FloatTensor(audio).unsqueeze(0).to(self.device))
+            e = e.squeeze(0)
+            if e.dim() > 1:
+                e = e.mean(dim=0)
+        return e.cpu().numpy()[None, :]
 
 
 def predict(clf, X, device):
@@ -314,8 +387,73 @@ def macro_pr(y_true, y_pred):
     }
 
 
+def predict_proba(clf, X, device):
+    """Per-row class probabilities. Softmax, so scores are comparable across
+    rows before they are averaged -- raw logits are not."""
+    clf.eval()
+    with torch.no_grad():
+        logits = clf(torch.FloatTensor(X).to(device))
+        return torch.softmax(logits, dim=1).cpu().numpy()
+
+
+def aggregate_by_group(probs, y_true, groups):
+    """Score-level aggregation -> one decision per group.
+
+    THE SECOND EVALUATION MODE. Per-bout asks "can you name the animal from one
+    1.4 s call"; this asks "can you name it from all the calls in a recording",
+    which is what a deployed system would actually have.
+
+    Mean of the probability vectors over the group, then a single argmax. Mean
+    of probabilities (not of logits, and not a majority vote) because it keeps
+    a confident bout weighted above an uncertain one while staying bounded.
+
+    A group's label is taken from its first row and asserted to be unanimous:
+    a recording holds one individual by construction, so a mixed group means
+    the group ids and labels have desynchronised, and that must fail loudly
+    rather than quietly score against a fabricated label.
+
+    -> (group_true, group_pred, group_keys)
+    """
+    order = {}
+    for i, gid in enumerate(groups):
+        order.setdefault(gid, []).append(i)
+
+    keys = list(order)
+    g_true = np.empty(len(keys), dtype=y_true.dtype)
+    g_pred = np.empty(len(keys), dtype=np.int64)
+    for j, gid in enumerate(keys):
+        rows = order[gid]
+        labels = y_true[rows]
+        if not np.all(labels == labels[0]):
+            raise RuntimeError(
+                f"group {gid!r} spans {len(set(labels.tolist()))} individuals. "
+                f"A recording is one animal by construction, so the group ids "
+                f"and labels are misaligned -- refusing to score this."
+            )
+        g_true[j] = labels[0]
+        g_pred[j] = int(probs[rows].mean(axis=0).argmax())
+    return g_true, g_pred, keys
+
+
+def group_metrics(probs, y_true, groups, num_classes):
+    """Aggregated accuracy / macro-F1 / precision / recall, plus group counts."""
+    g_true, g_pred, keys = aggregate_by_group(probs, y_true, groups)
+    out = {
+        "accuracy": float((g_true == g_pred).mean()),
+        "n_groups": len(keys),
+    }
+    out.update(macro_pr(g_true, g_pred))
+    # how many groups each individual actually got: a macro average over
+    # classes with one or two groups is volatile, and the reader must see that
+    counts = {int(c): int((g_true == c).sum()) for c in np.unique(g_true)}
+    out["groups_per_class"] = counts
+    out["min_groups_per_class"] = min(counts.values()) if counts else 0
+    return out
+
+
 def probe_layer(train_X, train_y, test_X, test_y, num_classes, weights,
-                device, seeds, steps, patience, val_frac, classes=None):
+                device, seeds, steps, patience, val_frac, classes=None,
+                test_groups=None):
     """Converged probe, one run per seed. Test never touches selection."""
     runs, last_pred = [], None
     for seed in seeds:
@@ -331,6 +469,21 @@ def probe_layer(train_X, train_y, test_X, test_y, num_classes, weights,
         res["train_f1_macro"] = evaluate(clf, train_X[keep], train_y[keep], device)["f1_macro"]
         res["best_step"] = best_step
         res["seed"] = seed
+
+        # ---- second evaluation mode: one decision per source recording ----
+        if test_groups is not None:
+            probs = predict_proba(clf, test_X, device)
+            # SELF-CHECK: with every row in its own group, aggregation must
+            # reproduce the per-bout result exactly. If this ever fails the
+            # grouping or averaging is wrong, and every aggregated number in
+            # this run is untrustworthy -- so it fails here, not in a figure.
+            solo = aggregate_by_group(probs, test_y, np.arange(len(test_y)))[1]
+            if not np.array_equal(solo, last_pred):
+                raise RuntimeError(
+                    "aggregation self-check failed: groups of one did not "
+                    "reproduce the per-bout predictions."
+                )
+            res["grouped"] = group_metrics(probs, test_y, test_groups, num_classes)
         runs.append(res)
 
     def m(k):
@@ -348,6 +501,21 @@ def probe_layer(train_X, train_y, test_X, test_y, num_classes, weights,
         "best_step_mean": m("best_step"),
         "runs": runs,
     }
+
+    # aggregated mode, averaged over the same seeds. Reported ALONGSIDE the
+    # per-bout numbers above, never replacing them.
+    if test_groups is not None and "grouped" in runs[0]:
+        gm = [r["grouped"] for r in runs]
+        out["grouped"] = {
+            "f1_macro_mean": float(np.mean([r["f1_macro"] for r in gm])),
+            "f1_macro_std": float(np.std([r["f1_macro"] for r in gm])),
+            "precision_macro_mean": float(np.mean([r["precision_macro"] for r in gm])),
+            "recall_macro_mean": float(np.mean([r["recall_macro"] for r in gm])),
+            "accuracy_mean": float(np.mean([r["accuracy"] for r in gm])),
+            "n_groups": gm[0]["n_groups"],
+            "groups_per_class": gm[0]["groups_per_class"],
+            "min_groups_per_class": gm[0]["min_groups_per_class"],
+        }
 
     # per-individual breakdown from the last seed: which animals are being
     # missed, and how they are confused
@@ -408,6 +576,9 @@ def main():
     if args.model in AVEX_MODELS and args.condition == "adapted":
         raise SystemExit(f"{args.model} is evaluated ZERO-SHOT only; there is "
                          f"no adapted AVES cell in this experiment.")
+    if args.model in SINGLE_EMBEDDING_MODELS and args.condition == "adapted":
+        raise SystemExit(f"{args.model} is evaluated ZERO-SHOT only; there is "
+                         f"no adapted ECAPA cell in this experiment.")
 
     root = SCRIPT_DIR.parent
     with open(root / "config" / "config.yaml") as f:
@@ -501,27 +672,53 @@ def main():
             )
         return extractor
 
+    def recover_groups(split_name, y):
+        """Group ids for a cache written before `g` was stored.
+
+        Bout and file regimes emit exactly ONE row per manifest item, so row i
+        is item i -- but ONLY if nothing was dropped. That is checked, not
+        assumed: if the counts disagree the mapping is unknowable and we return
+        None, which disables aggregation for this cell rather than silently
+        grouping the wrong bouts together. Windowed regimes emit several rows
+        per item and are never recoverable this way.
+        """
+        items = splits[split_name]
+        if len(y) != len(items):
+            logger.warning(
+                f"  {split_name}: cache has {len(y)} rows for {len(items)} "
+                f"manifest items -- group ids cannot be recovered, so "
+                f"score-level aggregation is DISABLED for this cell. "
+                f"Re-run with --force-extract to record them properly."
+            )
+            return None
+        logger.info(f"  {split_name}: recovered group ids from the manifest "
+                    f"({len(y)} rows == {len(items)} items)")
+        return np.asarray([it["file"] for it in items])
+
     def load_or_extract(split_name, cache_path):
         if cache_path.exists() and not args.force_extract:
             logger.info(f"reusing cached {split_name}: {cache_path.name}")
             z = np.load(cache_path)
-            return z["X"], z["y"]
-        X, y = _extractor().extract_split(splits[split_name], class_to_idx,
-                                          split_name, label_key)
+            X, y = z["X"], z["y"]
+            g = z["g"] if "g" in z.files else recover_groups(split_name, y)
+            return X, y, g
+        X, y, g = _extractor().extract_split(splits[split_name], class_to_idx,
+                                             split_name, label_key)
         tmp = cache_path.with_suffix(".tmp.npz")
-        np.savez_compressed(tmp, X=X, y=y)
+        np.savez_compressed(tmp, X=X, y=y, g=g)
         tmp.replace(cache_path)      # atomic: a kill mid-write leaves no half file
         logger.info(f"cached {split_name} -> {cache_path.name}")
-        return X, y
+        return X, y, g
 
     if legacy_cache.exists() and not args.force_extract:
         # a cache written before the split was separated
         logger.info(f"loading combined cache: {legacy_cache.name}")
         z = np.load(legacy_cache)
         train_X, train_y, test_X, test_y = z["train_X"], z["train_y"], z["test_X"], z["test_y"]
+        test_g = recover_groups("test", test_y)
     else:
-        train_X, train_y = load_or_extract("train", cache_train)
-        test_X, test_y = load_or_extract("test", cache_test)
+        train_X, train_y, _ = load_or_extract("train", cache_train)
+        test_X, test_y, test_g = load_or_extract("test", cache_test)
 
     if extractor is not None:
         if hasattr(extractor, "provenance"):
@@ -549,15 +746,17 @@ def main():
             train_X[:, layer, :], train_y, test_X[:, layer, :], test_y,
             num_classes, weights, device, seeds,
             args.probe_steps, args.probe_patience, args.val_frac,
-            classes=classes,
+            classes=classes, test_groups=test_g,
         )
         results[str(layer)] = r
         tag = layer_tag(args.model, layer)
+        agg = (f"   | grouped F1 {r['grouped']['f1_macro_mean']:.4f}"
+               if "grouped" in r else "")
         logger.info(f"  layer {layer:>2} ({tag:<13}) "
                     f"F1 {r['f1_macro_mean']:.4f} +- {r['f1_macro_std']:.4f}  "
                     f"P {r['precision_macro_mean']:.4f}  "
                     f"R {r['recall_macro_mean']:.4f}   "
-                    f"train F1 {r['train_f1_macro_mean']:.4f}")
+                    f"train F1 {r['train_f1_macro_mean']:.4f}{agg}")
 
     best = max(results.items(), key=lambda kv: kv[1]["f1_macro_mean"])
     logger.info(f"\nBEST layer {best[0]}: F1 {best[1]['f1_macro_mean']:.4f} "
@@ -571,11 +770,25 @@ def main():
             logger.info(f"    {name:<10} P {pc['precision']:.3f}  R {pc['recall']:.3f}  "
                         f"F1 {pc['f1']:.3f}  n={pc['support']}")
 
+    # Which AUDIO VERSION this cell used, read off the manifest's own paths
+    # rather than inferred from a directory name. The original-vs-denoised
+    # comparison lives or dies on not mixing these two up, and a result file
+    # that cannot say which audio produced it is not comparable to anything.
+    first_file = str(splits["train"][0]["file"]) if splits.get("train") else ""
+    if "/BIODA/" in first_file:
+        audio_version = "bioda_denoised"
+    elif "/Audio/" in first_file:
+        audio_version = "original"
+    else:
+        audio_version = "unknown"
+
     summary = {
         "model": args.model,
         "condition": args.condition,
         "checkpoint": args.checkpoint,
         "task": manifest["task"],
+        "manifest": str(manifest_path),
+        "audio_version": audio_version,
         "num_classes": num_classes,
         "chance": 1 / num_classes,
         "classes": classes,
@@ -593,12 +806,47 @@ def main():
         "split_by": manifest.get("split_by", "session"),
         "n_train": int(len(train_y)),
         "n_test": int(len(test_y)),
+        # ECAPA has no layer stack: one embedding, so n_layers == 1 and
+        # "best_layer 0" means the utterance embedding, NOT a CNN front-end.
+        "single_embedding": args.model in SINGLE_EMBEDDING_MODELS,
         "best_layer": int(best[0]),
         "best_f1_macro": best[1]["f1_macro_mean"],
         "best_precision_macro": best[1]["precision_macro_mean"],
         "best_recall_macro": best[1]["recall_macro_mean"],
         "layers": results,
     }
+
+    # Aggregation is a SECOND evaluation mode, so it gets its own best layer.
+    # The layer that is best per bout need not be the layer that is best once
+    # scores are pooled, and quietly reusing the per-bout layer would hide that.
+    if "grouped" in best[1]:
+        gbest = max(results.items(),
+                    key=lambda kv: kv[1]["grouped"]["f1_macro_mean"])
+        summary["aggregation"] = {
+            "mode": "score-level: mean of per-bout softmax within a group, "
+                    "then one argmax per group",
+            "group_by": "source recording",
+            "n_groups": best[1]["grouped"]["n_groups"],
+            "groups_per_class": best[1]["grouped"]["groups_per_class"],
+            "min_groups_per_class": best[1]["grouped"]["min_groups_per_class"],
+            "best_layer": int(gbest[0]),
+            "best_f1_macro": gbest[1]["grouped"]["f1_macro_mean"],
+            "best_accuracy": gbest[1]["grouped"]["accuracy_mean"],
+            "best_precision_macro": gbest[1]["grouped"]["precision_macro_mean"],
+            "best_recall_macro": gbest[1]["grouped"]["recall_macro_mean"],
+            # the aggregated score AT the per-bout best layer, so the two modes
+            # can also be compared at a single fixed layer
+            "f1_macro_at_bout_best_layer": best[1]["grouped"]["f1_macro_mean"],
+        }
+        logger.info(
+            f"\nAGGREGATED (one decision per recording, {best[1]['grouped']['n_groups']} groups)"
+            f"\n  best layer {gbest[0]}: F1 {gbest[1]['grouped']['f1_macro_mean']:.4f}  "
+            f"acc {gbest[1]['grouped']['accuracy_mean']:.4f}  "
+            f"(per-bout best was layer {best[0]} at {best[1]['f1_macro_mean']:.4f})")
+        if best[1]["grouped"]["min_groups_per_class"] < 3:
+            logger.warning(
+                f"  an individual has only {best[1]['grouped']['min_groups_per_class']} "
+                f"test recording(s): the aggregated macro average is volatile here")
     if extractor_provenance is not None:
         summary["extractor"] = extractor_provenance
         summary["layer0_is_cnn_frontend"] = args.model not in AVEX_MODELS
