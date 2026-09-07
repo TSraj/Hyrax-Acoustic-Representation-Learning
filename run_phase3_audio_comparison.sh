@@ -145,10 +145,17 @@ export ESP_CACHE_HOME=${ESP_CACHE_HOME:-$WORK/hf_cache/esp}
 # nodes cannot reach: small files download fine, then weights fail with "CAS
 # Client Error".
 export HF_HUB_DISABLE_XET=${HF_HUB_DISABLE_XET:-1}
-# Everything is pre-downloaded, so no cell should ever reach the network. If
-# one tries, failing fast is better than 60 tasks stalling on a connect
-# timeout. Unset this if you deliberately want a cell to fetch weights.
-export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
+# NOT set offline on purpose. Every previous job in this project ran online,
+# and the cache turns out to be incomplete in a way that only offline mode
+# exposes: for several repos the weights and the config were fetched at
+# DIFFERENT revisions, so refs/main resolves to a snapshot holding config.json
+# and no weights. Online, transformers just fetches the missing file and the
+# run proceeds -- which is why this never surfaced before. Forcing offline
+# turned a working setup into a hard failure, so it stays off.
+#
+# Do not "fix" this by pinning revisions or rebuilding the cache: the models
+# are already downloaded, and the only thing offline mode bought was failing
+# fast on a network stall that has never actually happened here.
 
 echo "=============================================================="
 echo "AUDIO COMPARISON - frozen zero-shot"
