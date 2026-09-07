@@ -77,6 +77,9 @@ ZERO-SHOT ONLY. This module refuses a checkpoint on purpose -- there is no
 fine-tuned AVES cell in this experiment.
 """
 
+import hashlib
+import logging
+import re
 import sys
 from pathlib import Path
 
@@ -102,6 +105,54 @@ AVEX_MODEL_IDS = {
     "aves2_eat_all": "esp_aves2_eat_all",
 }
 EAT_REMOTE_REPO = "worstchan/EAT-base_epoch30_pretrain"
+
+# --------------------------------------------------------------- weight repair
+# avex 1.3.0 CANNOT load these checkpoints into the model it just built, and it
+# fails SILENTLY. Measured 2026-09-07 on esp_aves2_eat_bio:
+#
+#     avex.models.utils.load INFO Checkpoint loaded: 0/150 params matched,
+#                                 164 unexpected
+#
+# and then `load_model` returns normally. The cause is one path segment.
+# `_load_checkpoint` (avex/models/utils/load.py:521) decides whether to strip a
+# "model." prefix by testing `any(k.startswith("model."))` over the TARGET
+# keys -- but every target key here starts with "backbone.model.", so the test
+# is False, nothing is stripped, and its later "backbone." repair produces
+# "backbone.blocks.0..." against a model that wants
+# "backbone.model.blocks.0...". Nothing matches, `load_state_dict(strict=False)`
+# reports it at INFO level, and the model keeps the weights it was constructed
+# with -- the plain `worstchan/EAT-base` backbone.
+#
+# The visible symptom was that esp_aves2_eat_bio and esp_aves2_eat_all scored
+# IDENTICALLY in all 8 audio-comparison cells: they were never AVES 2 at all,
+# they were the same untouched EAT backbone twice.
+#
+# So the mapping is done here instead, and verified. Checkpoint side:
+#   modality_encoders.IMAGE.local_encoder.proj.*        -> local_encoder.proj.*
+#   modality_encoders.IMAGE.extra_tokens                -> extra_tokens
+#   modality_encoders.IMAGE.fixed_positional_encoder.*  -> fixed_positional_...
+#   modality_encoders.IMAGE.context_encoder.norm.*      -> pre_norm.*
+#   blocks.N.*                                          -> blocks.N.*
+# then everything is prefixed with "backbone.model.".
+#
+# The context_encoder.norm -> pre_norm rename is the one that is not a pure
+# prefix edit. It is the same tensor in both layouts: fairseq data2vec2 applies
+# the modality encoder's context_encoder norm after CLS is concatenated and
+# before the first block, which is exactly where the HF port applies
+# `pre_norm` (eat_model.py:83, `x = self.pre_norm(x)` between the extra-token
+# cat and the block loop). Shapes agree (768,) and the tensor is NOT an
+# identity LayerNorm -- weight mean 0.032, std 0.034 -- so dropping it would
+# leave a meaningfully wrong scale going into every block.
+CKPT_MODALITY_PREFIX = "modality_encoders.IMAGE."
+CKPT_RENAMES = {
+    "context_encoder.norm.weight": "pre_norm.weight",
+    "context_encoder.norm.bias": "pre_norm.bias",
+}
+TARGET_PREFIX = "backbone.model."
+# The checkpoint also carries the pretraining decoder and EMA target encoder,
+# which this feature extractor has no modules for. Those are expected to go
+# unused; anything else going unused is not.
+EXPECTED_UNUSED_PREFIXES = ("decoder.", "context_encoder.")
 
 SAMPLE_RATE = 16000
 N_FRAMES = 1024          # mel frames the EAT processor targets
@@ -162,6 +213,117 @@ def shim_eat_for_transformers5(logger=None):
         logger.info("applied transformers>=5 shim to remote EATModel "
                     "(missing all_tied_weights_keys)")
     return cls
+
+
+class AvexLoadLog:
+    """Capture what avex's loader says while it runs.
+
+    avex reports the one number that matters -- how many parameters the
+    checkpoint actually landed on -- at INFO level and then carries on
+    regardless. The probe scripts configure their own logger, so those records
+    can vanish entirely. Attach a handler to avex's module logger for the
+    duration of the load and read the outcome back as data.
+    """
+
+    LOADED_RE = re.compile(
+        r"Checkpoint loaded: (\d+)/(\d+) params matched, (\d+) unexpected")
+    FROM_RE = re.compile(r"Loading checkpoint from: (.+)")
+
+    def __init__(self):
+        self.matched = None
+        self.total = None
+        self.unexpected = None
+        self.checkpoint_path = None
+        self.lines = []
+        self._logger = logging.getLogger("avex.models.utils.load")
+        self._handler = None
+        self._prev_level = None
+
+    def __enter__(self):
+        outer = self
+
+        class _H(logging.Handler):
+            def emit(self, record):
+                msg = record.getMessage()
+                outer.lines.append(msg)
+                m = outer.LOADED_RE.search(msg)
+                if m:
+                    outer.matched = int(m.group(1))
+                    outer.total = int(m.group(2))
+                    outer.unexpected = int(m.group(3))
+                m = outer.FROM_RE.search(msg)
+                if m:
+                    outer.checkpoint_path = m.group(1).strip()
+
+        self._handler = _H()
+        self._prev_level = self._logger.level
+        # the INFO records are the payload; a caller who set WARNING globally
+        # must not be able to hide them
+        self._logger.setLevel(logging.INFO)
+        self._logger.addHandler(self._handler)
+        return self
+
+    def __exit__(self, *exc):
+        self._logger.removeHandler(self._handler)
+        self._logger.setLevel(self._prev_level)
+        return False
+
+
+def remap_esp_checkpoint(state_dict, target_keys):
+    """ESP AVES 2 checkpoint keys -> the HF EAT module names, plus a report.
+
+    Returns (mapped, report). `mapped` holds only keys the target actually has,
+    at matching shapes; `report` says what was covered and what was dropped, so
+    the caller can refuse to run rather than quietly probing a half-loaded
+    encoder.
+    """
+    target_keys = set(target_keys)
+    mapped, unused, shape_mismatch = {}, [], []
+
+    for k, v in state_dict.items():
+        inner = k[len(CKPT_MODALITY_PREFIX):] \
+            if k.startswith(CKPT_MODALITY_PREFIX) else k
+        inner = CKPT_RENAMES.get(inner, inner)
+        tgt = TARGET_PREFIX + inner
+        if tgt not in target_keys:
+            unused.append(k)
+            continue
+        mapped[tgt] = v
+
+    missing = sorted(target_keys - set(mapped))
+    unexpected_unused = [k for k in unused if not any(
+        k.startswith(CKPT_MODALITY_PREFIX + p) or k.startswith(p)
+        for p in EXPECTED_UNUSED_PREFIXES)]
+
+    return mapped, {
+        "n_target": len(target_keys),
+        "n_mapped": len(mapped),
+        "missing": missing,
+        "n_unused_ckpt": len(unused),
+        "unused_unexpected": unexpected_unused[:10],
+        "shape_mismatch": shape_mismatch,
+    }
+
+
+def weights_fingerprint(model):
+    """sha1 over every parameter tensor, in sorted-name order.
+
+    This exists because the failure it guards against was invisible: two
+    different avex model ids produced byte-identical results for eight cells,
+    and nothing in any output said the weights were the same. The fingerprint
+    goes into the result JSON, so two cells claiming to be different encoders
+    can be checked against each other mechanically instead of by noticing a
+    coincidence in a summary table.
+    """
+    h = hashlib.sha1()
+    sd = model.state_dict()
+    for name in sorted(sd):
+        t = sd[name]
+        h.update(name.encode())
+        h.update(str(tuple(t.shape)).encode())
+        h.update(t.detach().to("cpu", torch.float32).contiguous()
+                 .numpy().tobytes())
+    return h.hexdigest()
 
 
 def valid_time_columns(duration_seconds):
@@ -259,12 +421,23 @@ class AvesLayerExtractor:
         if local_ckpt is not None:
             logger.info(f"using cached weights, no network: {local_ckpt}")
 
-        self.model = load_model(self.avex_model_id, device=self.device,
-                                checkpoint_path=local_ckpt,
-                                return_features_only=True)
+        with AvexLoadLog() as load_log:
+            self.model = load_model(self.avex_model_id, device=self.device,
+                                    checkpoint_path=local_ckpt,
+                                    return_features_only=True)
+
+        self.weight_load = self._ensure_weights_loaded(
+            local_ckpt or load_log.checkpoint_path, load_log, logger)
+
         for p in self.model.parameters():
             p.requires_grad = False
         self.model.eval()
+
+        self.weights_sha1 = weights_fingerprint(self.model)
+        logger.info(f"  weights sha1 {self.weights_sha1[:16]} "
+                    f"({self.weight_load['params_loaded']}/"
+                    f"{self.weight_load['params_total']} params from "
+                    f"{Path(self.weight_load['checkpoint_file']).name})")
 
         modules = dict(self.model.named_modules())
         missing = [n for n in LAYER_MODULES if n not in modules]
@@ -287,6 +460,89 @@ class AvesLayerExtractor:
                     f"NOT a waveform CNN front-end), 1..{N_BLOCKS} = blocks")
         logger.info(f"  canvas {CANVAS_SECONDS:.2f}s, grid {TIME_COLS}x{FREQ_ROWS}, "
                     f"pooling={pooling}, pad_mode={pad_mode}, batch={batch_size}")
+
+    def _ensure_weights_loaded(self, checkpoint_file, load_log, logger):
+        """Guarantee the AVES 2 weights are IN the model, or refuse to run.
+
+        avex reports its own result and continues either way, so this checks
+        that report and repairs it when it is a miss. A partial load is treated
+        exactly like a total miss: an encoder that is 80% pretrained weights
+        and 20% freshly initialised is not a model anyone can name in a paper.
+        """
+        if checkpoint_file is None:
+            raise RuntimeError(
+                f"{self.avex_model_id}: no checkpoint was loaded at all. avex "
+                f"never logged a checkpoint path, which means it fell back to "
+                f"the bare {EAT_REMOTE_REPO} backbone. Pre-download the "
+                f"weights (run_phase3_aves2_predownload.sh) and re-run."
+            )
+
+        target = self.model.state_dict()
+        n_target = len(target)
+
+        if load_log.matched == n_target:
+            logger.info(f"avex loaded the checkpoint cleanly: "
+                        f"{load_log.matched}/{n_target} params")
+            return {"checkpoint_file": str(checkpoint_file),
+                    "params_total": n_target,
+                    "params_loaded": int(load_log.matched),
+                    "loader": "avex",
+                    "repaired": False}
+
+        logger.warning(
+            f"avex matched {load_log.matched}/{n_target} params from "
+            f"{checkpoint_file} -- the AVES 2 weights are NOT in the model. "
+            f"Remapping the checkpoint keys here instead."
+        )
+
+        from avex.utils.utils import universal_torch_load
+        raw = universal_torch_load(checkpoint_file, map_location="cpu")
+        # the ESP safetensors come back wrapped: avex's loader hands back
+        # {"model_state_dict": {...}} rather than the tensors directly
+        if isinstance(raw, dict):
+            for k in ("model_state_dict", "state_dict", "model", "module"):
+                if k in raw and isinstance(raw[k], dict):
+                    raw = raw[k]
+                    break
+
+        mapped, report = remap_esp_checkpoint(raw, target.keys())
+
+        bad_shape = [(k, tuple(mapped[k].shape), tuple(target[k].shape))
+                     for k in mapped
+                     if tuple(mapped[k].shape) != tuple(target[k].shape)]
+        if bad_shape or report["missing"] or report["unused_unexpected"]:
+            raise RuntimeError(
+                f"{self.avex_model_id}: cannot map the checkpoint onto this "
+                f"model.\n"
+                f"  mapped        : {report['n_mapped']}/{report['n_target']}\n"
+                f"  missing       : {report['missing'][:6]}\n"
+                f"  shape clashes : {bad_shape[:3]}\n"
+                f"  unused (not decoder/EMA): "
+                f"{report['unused_unexpected']}\n"
+                f"The avex or upstream EAT layout has changed; the key map in "
+                f"this file must be updated before any number is trusted."
+            )
+
+        result = self.model.load_state_dict(mapped, strict=False)
+        loaded = n_target - len(result.missing_keys)
+        if loaded != n_target:
+            raise RuntimeError(
+                f"{self.avex_model_id}: remap still left {len(result.missing_keys)} "
+                f"parameters unloaded: {result.missing_keys[:6]}"
+            )
+
+        logger.info(f"repaired: {loaded}/{n_target} params loaded from the "
+                    f"AVES 2 checkpoint ({report['n_unused_ckpt']} checkpoint "
+                    f"tensors unused -- pretraining decoder and EMA target "
+                    f"encoder, which this extractor has no modules for)")
+
+        return {"checkpoint_file": str(checkpoint_file),
+                "params_total": n_target,
+                "params_loaded": int(loaded),
+                "loader": "phase3_28 remap (avex matched "
+                          f"{load_log.matched}/{n_target})",
+                "repaired": True,
+                "n_unused_ckpt_tensors": report["n_unused_ckpt"]}
 
     @staticmethod
     def _cached_checkpoint(avex_model_id):
@@ -455,6 +711,11 @@ class AvesLayerExtractor:
             "loader": "avex",
             "avex_model_id": self.avex_model_id,
             "backbone_repo": EAT_REMOTE_REPO,
+            # the guard against the failure that made eat_bio and eat_all
+            # byte-identical: two cells claiming different encoders must not
+            # share a fingerprint
+            "weights_sha1": self.weights_sha1,
+            "weight_load": self.weight_load,
             "sample_rate": SAMPLE_RATE,
             "canvas_seconds": CANVAS_SECONDS,
             "patch_grid": {"time": TIME_COLS, "freq": FREQ_ROWS},

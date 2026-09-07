@@ -16,10 +16,14 @@
 #   $HF_HOME/hub/models--worstchan--EAT-base_epoch30_pretrain
 #       the EAT backbone (~343 MB) AND its remote modelling code, which is
 #       fetched with trust_remote_code=True
-#   $ESP_CACHE_HOME/esp-aves2-eat-bio-*.safetensors
-#       the AVES 2 bio-pretrained weights (~358 MB), resolved from
-#       hf://EarthSpeciesProject/esp-aves2-eat-bio via fsspec -- NOT the HF hub
-#       cache, so warming the hub alone is not enough
+#   $ESP_CACHE_HOME/esp-aves2-eat-{bio,all}-*.safetensors
+#       the AVES 2 pretrained weights (~358 MB each), resolved from
+#       hf://EarthSpeciesProject/esp-aves2-eat-{bio,all} via fsspec -- NOT the
+#       HF hub cache, so warming the hub alone is not enough
+#
+# BOTH ids are fetched. Until 2026-09-07 this script pulled only `bio`, so the
+# `all` cell in the audio-comparison grid had nothing cached and went to the
+# network from a compute node on every run.
 #
 # QUOTA: the second cache is NOT controlled by HF_HOME. avex resolves it as
 #   ESP_CACHE_HOME if set, else Path.home()/".cache"/"esp"   (avex/utils/utils.py)
@@ -136,8 +140,8 @@ print(f"torch {torch.__version__}  cuda={torch.cuda.is_available()}", flush=True
 
 import sys
 sys.path.insert(0, "scripts")
-from phase3_28_avex_extractor import (AVEX_MODEL_ID, CANVAS_SECONDS, NUM_LAYERS,
-                                      AvesLayerExtractor)
+from phase3_28_avex_extractor import (AVEX_MODEL_IDS, CANVAS_SECONDS,
+                                      NUM_LAYERS, AvesLayerExtractor)
 
 
 class L:
@@ -145,21 +149,45 @@ class L:
     def warning(self, m): print(f"  WARN {m}", flush=True)
 
 
-print(f"downloading + loading {AVEX_MODEL_ID} ...", flush=True)
-ex = AvesLayerExtractor("aves2_eat_bio", None, L(), batch_size=2)
-
-# a real forward pass: proves the shim, the hooks and the layer mapping all
-# work on THIS node, not merely that the files are cached
+# BOTH ids, not just bio. The audio-comparison grid probes eat_bio AND
+# eat_all, and only bio was ever pre-downloaded here -- so eat_all reached
+# for the network from a compute node every time it ran.
 rng = np.random.default_rng(0)
-out = ex.embed_many([rng.normal(0, 0.05, 16000).astype(np.float32),
-                     rng.normal(0, 0.05, 40000).astype(np.float32)])
-ex.close()
+fingerprints = {}
 
-assert out.shape == (2, NUM_LAYERS, 768), f"unexpected shape {out.shape}"
-assert np.isfinite(out).all(), "non-finite embeddings"
-print(f"\nforward OK: {out.shape}, {NUM_LAYERS} layers, canvas {CANVAS_SECONDS:.2f}s",
-      flush=True)
-print(f"elapsed {time.time() - t0:.0f}s", flush=True)
+for model_name in sorted(AVEX_MODEL_IDS):
+    print(f"\ndownloading + loading {model_name} "
+          f"({AVEX_MODEL_IDS[model_name]}) ...", flush=True)
+    ex = AvesLayerExtractor(model_name, None, L(), batch_size=2)
+
+    # a real forward pass: proves the shim, the hooks and the layer mapping all
+    # work on THIS node, not merely that the files are cached
+    out = ex.embed_many([rng.normal(0, 0.05, 16000).astype(np.float32),
+                         rng.normal(0, 0.05, 40000).astype(np.float32)])
+    fingerprints[model_name] = ex.weights_sha1
+    load = ex.weight_load
+    ex.close()
+
+    assert out.shape == (2, NUM_LAYERS, 768), f"unexpected shape {out.shape}"
+    assert np.isfinite(out).all(), "non-finite embeddings"
+    assert load["params_loaded"] == load["params_total"], \
+        f"{model_name}: only {load['params_loaded']}/{load['params_total']} loaded"
+    print(f"forward OK: {out.shape}, {NUM_LAYERS} layers, "
+          f"canvas {CANVAS_SECONDS:.2f}s", flush=True)
+
+# The check that the whole re-run exists for. Two ids that differ only in
+# pretraining corpus must not resolve to the same weights: when avex silently
+# failed to apply either checkpoint, both were the bare EAT backbone and every
+# metric came out byte-identical.
+print("\nweight fingerprints:", flush=True)
+for k, v in fingerprints.items():
+    print(f"  {k:16s} {v}", flush=True)
+if len(set(fingerprints.values())) != len(fingerprints):
+    print("\nFATAL: two AVES ids share a weight fingerprint -- the checkpoints "
+          "are not being applied.", file=sys.stderr)
+    sys.exit(1)
+print("all AVES ids carry distinct weights", flush=True)
+print(f"\nelapsed {time.time() - t0:.0f}s", flush=True)
 PYEOF
 
 echo ""

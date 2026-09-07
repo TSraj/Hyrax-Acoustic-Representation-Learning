@@ -120,7 +120,62 @@ def load_cells(result_dirs, logger=print):
             cells[key] = s
     for s in skipped:
         logger(f"  skipped: {s}")
+    check_distinct_encoders(cells, logger)
     return cells
+
+
+def check_distinct_encoders(cells, logger=print):
+    """Two models in one column must not be the same encoder.
+
+    The 2026-09-07 run reported aves2_eat_bio and aves2_eat_all as two
+    encoders across eight cells. They were one: avex had silently failed to
+    apply either checkpoint (0/150 params matched, logged at INFO) so both ran
+    the bare EAT backbone, and every metric came out byte-identical. Nothing in
+    the table said so -- it took noticing that fifteen rows contained fourteen
+    distinct numbers.
+
+    Two independent checks, because either can fire alone. The fingerprint is
+    definitive but only exists for cells probed after that fix; identical
+    metrics catch the older files too, and would also catch a manifest or cache
+    mix-up that duplicated a cell for some entirely different reason.
+    """
+    by_group = defaultdict(dict)
+    for (model, audio, split), s in cells.items():
+        by_group[(audio, split)][model] = s
+
+    fp_dupes, metric_dupes = [], []
+    for (audio, split), models in sorted(by_group.items()):
+        seen_fp, seen_metrics = defaultdict(list), defaultdict(list)
+        for model, s in sorted(models.items()):
+            fp = s.get("extractor", {}).get("weights_sha1")
+            if fp:
+                seen_fp[fp].append(model)
+            # the whole layer curve, not just the best number: two encoders
+            # agreeing on one layer to 4 dp is luck, agreeing on all of them
+            # is the same weights
+            curve = tuple(sorted(
+                (int(k), round(v["f1_macro_mean"], 6))
+                for k, v in s["layers"].items()))
+            seen_metrics[curve].append(model)
+
+        for fp, ms in seen_fp.items():
+            if len(ms) > 1:
+                fp_dupes.append((audio, split, ms, fp[:16]))
+        for _curve, ms in seen_metrics.items():
+            if len(ms) > 1:
+                metric_dupes.append((audio, split, ms))
+
+    for audio, split, ms, fp in fp_dupes:
+        logger(f"  FATAL: {audio}/{split}: {ms} share weight fingerprint {fp}")
+    for audio, split, ms in metric_dupes:
+        logger(f"  FATAL: {audio}/{split}: {ms} have identical layer curves")
+
+    if fp_dupes or metric_dupes:
+        raise SystemExit(
+            "Refusing to build a table in which two models are the same "
+            "encoder. Re-run the affected cells; if the models genuinely "
+            "differ, the loader is not applying their checkpoints."
+        )
 
 
 def rows_long(cells):
