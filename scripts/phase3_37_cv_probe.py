@@ -170,6 +170,94 @@ def extract_all(extractor, items, logger, batch_size=16):
     return X, np.asarray(kept)
 
 
+def bout_key(item):
+    """What identifies a bout independently of which manifest lists it."""
+    return (item["file"], round(float(item["start"]), 4),
+            round(float(item["end"]), 4))
+
+
+def load_or_extract(items, args, cache_dir, logger):
+    """Embeddings for `items`, in `items` order, extracting only if needed.
+
+    THE CACHE IS KEYED ON THE BOUT SET, NOT THE MANIFEST ORDER.
+
+    Both protocols hold exactly the same 4141 bouts but list them in different
+    orders -- session_loso groups by session, by_file_5fold by recording, and
+    they diverge from item 38 on. Hashing the ordered list therefore produced
+    two different keys for one set of embeddings, and the pilot re-extracted
+    everything for the second protocol. Harmless for wav2vec2 base at 105 s;
+    for xls_r_1b it is tens of wasted GPU-minutes per task.
+
+    So the fingerprint, and the stored row order, are the bouts sorted
+    canonically. On load the rows are mapped back to whatever order the caller
+    asked for, by key, and any bout the extractor dropped is simply absent
+    from the map.
+    """
+    keys = [bout_key(it) for it in items]
+    unique = len(set(keys)) == len(keys)
+
+    if not unique:
+        # two bouts with identical (file, start, end) cannot be told apart by
+        # key, so fall back to the order-sensitive cache rather than risk
+        # mapping a row onto the wrong bout
+        logger.warning("  manifest contains duplicate (file, start, end) "
+                       "bouts; using an order-sensitive embedding cache")
+        order = list(range(len(items)))
+    else:
+        order = sorted(range(len(items)), key=lambda i: keys[i])
+
+    fp_src = [keys[i] for i in order] if unique else keys
+    fp = hashlib.sha1(json.dumps(fp_src).encode()).hexdigest()[:10]
+    cache = cache_dir / f"{args.model}_{fp}.npz"
+
+    ordered_items = [items[i] for i in order]
+
+    if cache.exists() and not args.force_extract:
+        z = np.load(cache, allow_pickle=False)
+        Xc = z["X"]
+        cached_keys = [(f, round(float(s), 4), round(float(e), 4))
+                       for f, s, e in zip(z["files"], z["starts"], z["ends"])]
+        logger.info(f"reusing cached embeddings: {cache.name} {Xc.shape}")
+    else:
+        extractor = build_extractor(args.model, None, logger,
+                                    batch_size=args.batch_size)
+        Xc, kept_c = extract_all(extractor, ordered_items, logger,
+                                 args.batch_size)
+        cached_keys = [bout_key(ordered_items[i]) for i in kept_c]
+        tmp = cache.with_suffix(".tmp.npz")
+        np.savez_compressed(
+            tmp, X=Xc,
+            files=np.array([k[0] for k in cached_keys]),
+            starts=np.array([k[1] for k in cached_keys], dtype=np.float64),
+            ends=np.array([k[2] for k in cached_keys], dtype=np.float64))
+        tmp.replace(cache)
+        logger.info(f"cached embeddings -> {cache.name}")
+
+    if len(cached_keys) != len(Xc):
+        raise RuntimeError(f"cache holds {len(Xc)} rows for "
+                           f"{len(cached_keys)} bout keys -- refusing to use it")
+
+    row_of = {k: i for i, k in enumerate(cached_keys)}
+    if len(row_of) != len(cached_keys):
+        raise RuntimeError("cached bout keys are not unique -- refusing to "
+                           "map embeddings back onto the manifest")
+
+    rows, kept = [], []
+    for i, k in enumerate(keys):
+        r = row_of.get(k)
+        if r is not None:
+            rows.append(r)
+            kept.append(i)
+
+    if len(kept) < len(items):
+        logger.warning(f"  {len(items) - len(kept)} bouts have no embedding "
+                       f"and are excluded from every fold")
+    if not kept:
+        raise RuntimeError("no manifest bout matched a cached embedding")
+
+    return Xc[np.asarray(rows)], np.asarray(kept)
+
+
 # ------------------------------------------------------------ fold machinery
 
 def grouped_holdout(groups, y, frac, seed):
@@ -471,27 +559,8 @@ def main():
     device = ("cuda" if torch.cuda.is_available()
               else "mps" if torch.backends.mps.is_available() else "cpu")
 
-    # ---- embeddings: once per (model, manifest), shared by every fold ----
-    # keyed on the ITEM LIST, not the protocol: the two protocols hold the same
-    # bouts in the same order and differ only in fold ids, so they share a cache
-    fp = hashlib.sha1(json.dumps(
-        [(it["file"], round(it["start"], 4), round(it["end"], 4))
-         for it in items]).encode()).hexdigest()[:10]
-    cache = cache_dir / f"{args.model}_{fp}.npz"
-
-    if cache.exists() and not args.force_extract:
-        z = np.load(cache)
-        X, kept = z["X"], z["kept"]
-        logger.info(f"reusing cached embeddings: {cache.name} {X.shape}")
-    else:
-        extractor = build_extractor(args.model, None, logger,
-                                    batch_size=args.batch_size)
-        X, kept = extract_all(extractor, items, logger, args.batch_size)
-        tmp = cache.with_suffix(".tmp.npz")
-        np.savez_compressed(tmp, X=X, kept=kept)
-        tmp.replace(cache)
-        logger.info(f"cached embeddings -> {cache.name}")
-
+    # ---- embeddings: once per (model, audio), shared by BOTH protocols ----
+    X, kept = load_or_extract(items, args, cache_dir, logger)
     kept_items = [items[i] for i in kept]
     y = np.asarray([class_to_idx[it["individual"]] for it in kept_items])
     groups = np.asarray([it["file"] for it in kept_items])
