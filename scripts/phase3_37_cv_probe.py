@@ -27,8 +27,8 @@ THE LOOP
     for each repeat r, each outer fold k:
         test    = bouts with folds[r] == k
         train   = the rest
-        inner   = a grouped hold-out carved from TRAIN only
-        pick the layer with the best inner macro-F1        (1 seed)
+        inner   = 3 grouped folds carved from TRAIN only
+        pick the layer with the best mean inner macro-F1   (1 seed)
         refit on the whole of TRAIN at that layer          (5 seeds)
         average the 5 softmaxes -> one probability per test bout
     pool the out-of-fold probabilities and score them
@@ -260,40 +260,102 @@ def fit_and_prob(Xtr, ytr, groups_tr, Xte, num_classes, weights, device,
     return probs / len(seeds)
 
 
-def select_layer(X, y, groups, num_classes, layers, device, args, logger):
-    """Best layer by macro-F1 on a grouped hold-out of the TRAINING data."""
-    inner_tr, inner_va = grouped_holdout(groups, y, args.inner_frac,
-                                         SELECTION_SEED)
-    degraded = False
-    if len(inner_va) == 0:
-        # Every recording turned out to be the last one holding some class, so
-        # nothing could be held out as a group. Falling back to layer 0 would
-        # be a silent arbitrary choice; a stratified split of rows at least
-        # ranks the layers, and the degradation is recorded in the result so
-        # the fold is not read as a clean nested selection.
-        from phase3_20_probe_audit import stratified_split
-        inner_tr, inner_va = stratified_split(y, args.inner_frac,
-                                              SELECTION_SEED)
-        degraded = True
-        logger.warning("    no recording could be held out without emptying a "
-                       "class; layer selected on a STRATIFIED row split "
-                       "instead (bouts from one recording may span it)")
-    if len(inner_va) == 0:
-        raise RuntimeError(
-            "inner selection split is empty even after the stratified "
-            "fallback -- this fold cannot select a layer honestly.")
+def grouped_kfold(groups, k, seed):
+    """Partition rows into k folds by whole GROUP -> [(train_idx, val_idx)].
 
-    w = class_weights_for(y[inner_tr], num_classes)
-    scores = {}
-    for layer in layers:
-        p = fit_and_prob(X[inner_tr, layer], y[inner_tr], groups[inner_tr],
-                         X[inner_va, layer], num_classes, w, device,
-                         [SELECTION_SEED], args.selection_steps,
-                         args.probe_patience, val_frac=0.0)
-        scores[layer] = macro_pr(y[inner_va], p.argmax(1))["f1_macro"]
+    Recordings are dealt largest-first into the emptiest fold, so the folds
+    carry a similar number of bouts without ever splitting a recording. Same
+    rule as the outer by-file partition, applied one level down.
+    """
+    import random
+    by_group = defaultdict(list)
+    for i, g in enumerate(groups):
+        by_group[g].append(i)
+
+    order = list(by_group)
+    random.Random(seed).shuffle(order)
+    order.sort(key=lambda g: len(by_group[g]), reverse=True)
+
+    load = [0] * k
+    assign = {}
+    for g in order:
+        f = min(range(k), key=lambda j: (load[j], j))
+        assign[g] = f
+        load[f] += len(by_group[g])
+
+    fold_of = np.empty(len(groups), dtype=int)
+    for g, rows in by_group.items():
+        for i in rows:
+            fold_of[i] = assign[g]
+
+    return [(np.flatnonzero(fold_of != j), np.flatnonzero(fold_of == j))
+            for j in range(k) if (fold_of == j).any()]
+
+
+def inner_score(y_true, y_pred, trainable):
+    """Macro-F1 over the classes the inner fit could actually learn.
+
+    A class whose every bout sits in the inner validation fold has no training
+    rows there, so its F1 is 0 for EVERY layer. Including it adds a constant
+    to all layers and shrinks the differences that decide the choice, so it is
+    excluded from the inner comparison only -- never from the reported score.
+    """
+    from sklearn.metrics import f1_score
+    labels = sorted(trainable)
+    if not labels:
+        return 0.0
+    return float(f1_score(y_true, y_pred, labels=labels, average="macro",
+                          zero_division=0))
+
+
+def select_layer(X, y, groups, num_classes, layers, device, args, logger):
+    """Best layer by macro-F1 averaged over INNER FOLDS of the training data.
+
+    k-fold rather than a single hold-out: with 13-49 candidate layers whose
+    inner scores sit within a few points of each other, one split picks the
+    winner largely by which recordings happened to land in it. Averaging over
+    k folds is what the supervisor asked for, and it costs only probe fits --
+    the embeddings are already in memory.
+
+    The test bouts of the outer fold are not present here in any form.
+    """
+    splits = grouped_kfold(groups, args.inner_folds, SELECTION_SEED)
+    degraded = False
+
+    if len(splits) < 2:
+        # every recording landed in one fold: nothing to cross-validate over
+        from phase3_20_probe_audit import stratified_split
+        tr, va = stratified_split(y, args.inner_frac, SELECTION_SEED)
+        splits = [(tr, va)]
+        degraded = True
+        logger.warning("    could not build grouped inner folds; layer "
+                       "selected on a STRATIFIED row split instead (bouts "
+                       "from one recording may span it)")
+
+    totals = {layer: 0.0 for layer in layers}
+    n_used = 0
+    for tr, va in splits:
+        if len(va) == 0 or len(tr) == 0:
+            continue
+        trainable = set(np.unique(y[tr]).tolist()) & set(np.unique(y[va]).tolist())
+        w = class_weights_for(y[tr], num_classes)
+        for layer in layers:
+            p = fit_and_prob(X[tr, layer], y[tr], groups[tr], X[va, layer],
+                             num_classes, w, device, [SELECTION_SEED],
+                             args.selection_steps, args.probe_patience,
+                             val_frac=0.0)
+            totals[layer] += inner_score(y[va], p.argmax(1), trainable)
+        n_used += 1
+
+    if n_used == 0:
+        raise RuntimeError("no usable inner fold -- this outer fold cannot "
+                           "select a layer honestly.")
+
+    scores = {l: round(totals[l] / n_used, 4) for l in layers}
     best = max(layers, key=lambda l: (scores[l], -l))
-    return best, {"scores": scores, "degraded_inner_split": degraded,
-                  "n_inner_val": int(len(inner_va))}
+    return best, {"scores": scores,
+                  "inner_folds_used": n_used,
+                  "degraded_inner_split": degraded}
 
 
 # ------------------------------------------------------------------ metrics
@@ -368,7 +430,10 @@ def main():
                         "final fit because it only has to RANK layers")
     p.add_argument("--probe-patience", type=int, default=500)
     p.add_argument("--val-frac", type=float, default=0.2)
-    p.add_argument("--inner-frac", type=float, default=0.2)
+    p.add_argument("--inner-folds", type=int, default=3,
+                   help="inner grouped folds used to choose the layer")
+    p.add_argument("--inner-frac", type=float, default=0.2,
+                   help="only used by the degraded stratified fallback")
     p.add_argument("--force", action="store_true")
     p.add_argument("--force-extract", action="store_true")
     args = p.parse_args()
@@ -468,7 +533,7 @@ def main():
             s.update(fold=k, layer=layer, n_test=len(te),
                      n_individuals_tested=int(len(np.unique(y[te]))),
                      degraded_inner_split=sel["degraded_inner_split"],
-                     n_inner_val=sel["n_inner_val"])
+                     inner_folds_used=sel["inner_folds_used"])
             fold_rows.append(s)
             logger.info(f"  r{r} fold {k:2d}: layer {layer:2d}  "
                         f"n={len(te):4d}  F1 {s['f1_macro']:.4f}  "
@@ -519,9 +584,11 @@ def main():
             "selection_steps": args.selection_steps,
             "patience": args.probe_patience,
             "val_frac": args.val_frac,
+            "inner_folds": args.inner_folds,
             "inner_frac": args.inner_frac,
-            "layer_selection": "grouped hold-out of the training rows of each "
-                               "outer fold; test never used",
+            "layer_selection": f"{args.inner_folds}-fold grouped CV inside the "
+                               f"training rows of each outer fold, macro-F1 "
+                               f"averaged over inner folds; test never used",
             "seed_combination": "softmax averaged over seeds before argmax",
         },
         "split_exceptions": manifest.get("split_exceptions", {}),
