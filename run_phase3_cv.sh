@@ -60,8 +60,14 @@
 # layers is several times faster. If the cluster refuses 24h, drop to 12h and
 # resubmit; resumability makes that safe.
 #
+# AUC RERUN (2026-10-11): a result JSON without AUC or without its saved
+# probabilities counts as missing, so `sbatch run_phase3_cv.sh` over the old
+# results refits the linear probes only -- the embeddings come from emb_cache.
+#
 # OUTPUT
 #   outputs/phase3/cv_<audio>/cv_<protocol>_<model>.json
+#   outputs/phase3/cv_<audio>/probs/cv_<protocol>_<model>.npz   out-of-fold
+#       probabilities (repeats x bouts x 18) for bout averaging
 #   outputs/phase3/cv_<audio>/emb_cache/<model>_<hash>.npz
 
 set -euo pipefail

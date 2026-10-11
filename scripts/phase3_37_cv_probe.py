@@ -475,7 +475,23 @@ def per_individual(y_true, y_pred, classes, inventory):
     return out
 
 
-def score(y_true, y_pred, classes, cohort_idx):
+def macro_auc(y_true, probs, num_classes):
+    """One-vs-rest ROC AUC, unweighted mean over classes.
+
+    Threshold-free, so it says how well the probabilities RANK an individual's
+    bouts above everyone else's, which argmax metrics cannot. Only defined on
+    a pool that contains every class -- per-fold sets do not -- so it is
+    computed on the pooled out-of-fold probabilities only.
+    """
+    from sklearn.metrics import roc_auc_score
+    if len(np.unique(y_true)) < num_classes:
+        return None
+    p = probs / probs.sum(axis=1, keepdims=True)
+    return float(roc_auc_score(y_true, p, multi_class="ovr", average="macro",
+                               labels=list(range(num_classes))))
+
+
+def score(y_true, y_pred, classes, cohort_idx, probs=None):
     m = macro_pr(y_true, y_pred)
     m["accuracy"] = float((y_true == y_pred).mean())
     from sklearn.metrics import f1_score
@@ -483,6 +499,10 @@ def score(y_true, y_pred, classes, cohort_idx):
                    average=None, zero_division=0)
     m["f1_macro_cohort100"] = float(np.mean([per[i] for i in cohort_idx])) \
         if cohort_idx else None
+    # UAR = unweighted average recall = recall_macro; named for the paper
+    m["uar"] = m["recall_macro"]
+    if probs is not None:
+        m["auc_macro_ovr"] = macro_auc(y_true, probs, len(classes))
     return {k: (round(v, 4) if isinstance(v, float) else v)
             for k, v in m.items()}
 
@@ -492,14 +512,15 @@ def aggregate(probs, y_true, groups):
     order = defaultdict(list)
     for i, g in enumerate(groups):
         order[g].append(i)
-    gt, gp = [], []
+    gt, gprob = [], []
     for g, rows in order.items():
         labs = y_true[rows]
         if not np.all(labs == labs[0]):
             raise RuntimeError(f"recording {g!r} carries several individuals")
         gt.append(labs[0])
-        gp.append(int(probs[rows].mean(axis=0).argmax()))
-    return np.asarray(gt), np.asarray(gp)
+        gprob.append(probs[rows].mean(axis=0))
+    gprob = np.asarray(gprob)
+    return np.asarray(gt), gprob.argmax(1), gprob
 
 
 # --------------------------------------------------------------------- main
@@ -544,9 +565,18 @@ def main():
     n_folds, n_repeats = manifest["n_folds"], manifest["n_repeats"]
 
     result_path = out_dir / f"cv_{protocol}_{args.model}.json"
-    if result_path.exists() and not args.force:
-        logger.info(f"result exists: {result_path} -- pass --force to redo")
-        return
+    probs_path = out_dir / "probs" / f"cv_{protocol}_{args.model}.npz"
+    # A result written before AUC and the saved probabilities existed is
+    # incomplete, not done: redo it. The embedding cache is untouched, so
+    # this refits the linear probes only.
+    if result_path.exists() and probs_path.exists() and not args.force:
+        with open(result_path) as f:
+            done = "pooled_auc_mean" in json.load(f).get("summary", {})
+        if done:
+            logger.info(f"result exists: {result_path} -- pass --force to redo")
+            return
+    if result_path.exists():
+        logger.info(f"result predates AUC/probabilities -- redoing {result_path.name}")
 
     logger.info("=" * 72)
     logger.info(f"CV PROBE - {args.model} - {protocol}")
@@ -576,6 +606,9 @@ def main():
 
     seeds = list(range(42, 42 + args.probe_seeds))
     repeats_out, t0 = [], time.time()
+    # every out-of-fold probability, kept for the bout-averaging experiment
+    all_probs = np.zeros((n_repeats, len(y), num_classes), dtype=np.float32)
+    layer_of_bout = np.full((n_repeats, len(y)), -1, dtype=np.int16)
 
     for r in range(n_repeats):
         pooled = np.zeros((len(y), num_classes), dtype=np.float64)
@@ -597,6 +630,7 @@ def main():
                                  args.probe_steps, args.probe_patience,
                                  args.val_frac)
             pooled[te] = probs
+            layer_of_bout[r, te] = layer
 
             s = score(y[te], probs.argmax(1), classes, cohort_idx)
             s.update(fold=k, layer=layer, n_test=len(te),
@@ -608,14 +642,15 @@ def main():
                         f"n={len(te):4d}  F1 {s['f1_macro']:.4f}  "
                         f"acc {s['accuracy']:.4f}")
 
+        all_probs[r] = pooled
         pooled_pred = pooled.argmax(1)
-        gt, gp = aggregate(pooled, y, groups)
+        gt, gp, gprob = aggregate(pooled, y, groups)
         f1s = [f["f1_macro"] for f in fold_rows]
 
         repeats_out.append({
             "repeat": r,
-            "pooled": score(y, pooled_pred, classes, cohort_idx),
-            "pooled_aggregated": score(gt, gp, classes, cohort_idx),
+            "pooled": score(y, pooled_pred, classes, cohort_idx, pooled),
+            "pooled_aggregated": score(gt, gp, classes, cohort_idx, gprob),
             "n_recordings": int(len(gt)),
             "per_fold": fold_rows,
             "fold_f1_mean": round(float(np.mean(f1s)), 4),
@@ -631,6 +666,25 @@ def main():
 
     pooled_f1 = [r["pooled"]["f1_macro"] for r in repeats_out]
     agg_f1 = [r["pooled_aggregated"]["f1_macro"] for r in repeats_out]
+
+    def mean_of(block, key):
+        v = [r[block][key] for r in repeats_out if r[block][key] is not None]
+        return round(float(np.mean(v)), 4) if v else None
+
+    probs_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = probs_path.with_suffix(".tmp.npz")
+    np.savez_compressed(
+        tmp,
+        probs=all_probs,                      # (repeats, bouts, classes)
+        y=y.astype(np.int16),
+        classes=np.array(classes),
+        files=np.array([it["file"] for it in kept_items]),
+        starts=np.array([float(it["start"]) for it in kept_items]),
+        ends=np.array([float(it["end"]) for it in kept_items]),
+        folds=folds.astype(np.int16),         # (bouts, repeats)
+        layer=layer_of_bout)                  # (repeats, bouts)
+    tmp.replace(probs_path)
+    logger.info(f"wrote {probs_path}")
 
     out = {
         "model": args.model,
@@ -674,7 +728,12 @@ def main():
             "aggregated_f1_macro_std": round(float(np.std(agg_f1)), 4),
             "fold_f1_std_mean": round(float(np.mean(
                 [r["fold_f1_std"] for r in repeats_out])), 4),
+            "pooled_uar_mean": mean_of("pooled", "uar"),
+            "pooled_auc_mean": mean_of("pooled", "auc_macro_ovr"),
+            "aggregated_uar_mean": mean_of("pooled_aggregated", "uar"),
+            "aggregated_auc_mean": mean_of("pooled_aggregated", "auc_macro_ovr"),
         },
+        "probs_file": str(probs_path),
         "elapsed_seconds": round(time.time() - t0, 1),
     }
     with open(result_path, "w") as f:
@@ -687,7 +746,8 @@ def main():
                 f"+/- {s['pooled_f1_macro_std']:.4f}  "
                 f"acc {s['pooled_accuracy_mean']:.4f}  "
                 f"cohort100 F1 {s['pooled_f1_cohort100_mean']:.4f}  "
-                f"aggregated F1 {s['aggregated_f1_macro_mean']:.4f}")
+                f"aggregated F1 {s['aggregated_f1_macro_mean']:.4f}  "
+                f"UAR {s['pooled_uar_mean']:.4f}  AUC {s['pooled_auc_mean']}")
     logger.info(f"wrote {result_path}")
 
 
