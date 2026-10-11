@@ -177,6 +177,8 @@ def summary_rows(cells):
             "f1_cohort100": su["pooled_f1_cohort100_mean"],
             "f1_aggregated": su["aggregated_f1_macro_mean"],
             "f1_aggregated_sd": su["aggregated_f1_macro_std"],
+            "accuracy_aggregated": round(float(np.mean(
+                [r["pooled_aggregated"]["accuracy"] for r in s["repeats"]])), 4),
         })
     return rows
 
@@ -274,13 +276,23 @@ def family_table(rows, protocol):
                            ("f1_sd", "f1_sd_across_folds"),
                            ("acc", "accuracy"),
                            ("f1_cohort100", "f1_cohort100"),
-                           ("f1_agg", "f1_aggregated")]:
+                           ("f1_agg", "f1_aggregated"),
+                           ("acc_agg", "accuracy_aggregated")]:
                 row[f"{audio}_{k}"] = a[src] if a else None
         o, b = row.get("original_f1"), row.get("bioda_f1")
         row["delta_original_minus_bioda"] = (round(o - b, 4)
                                              if o is not None and b is not None
                                              else None)
         out.append(row)
+    # Rank 1 = best F1 among all models, per audio version; ties share a rank.
+    for audio in ("original", "bioda"):
+        f1s = [r[f"{audio}_f1"] for r in out if r[f"{audio}_f1"] is not None]
+        for r in out:
+            f = r[f"{audio}_f1"]
+            r[f"{audio}_rank"] = (1 + sum(x > f for x in f1s)
+                                  if f is not None else None)
+    out = [{"original_rank": r.pop("original_rank"),
+            "bioda_rank": r.pop("bioda_rank"), **r} for r in out]
     out.sort(key=lambda r: (FAMILY_ORDER.index(r["family"])
                             if r["family"] in FAMILY_ORDER else 99,
                             -(r["original_f1"] or 0)))
