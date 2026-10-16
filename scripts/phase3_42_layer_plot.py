@@ -16,6 +16,9 @@ reference level in every panel, not as a line.
 WHAT IT WRITES (default: outputs/phase3/FINAL/13_cv_layer_curves)
 -----------------------------------------------------------------
   cv_layers_<audio>.png      the plot, 300 DPI, one per audio version
+  cv_layers_<audio>_<family>.png
+                             each panel as its own figure (monolingual,
+                             multilingual, bioacoustic), same y-scale
   cv_layer_peaks_<audio>.csv one row per encoder: input type, layers, peak
                              layer and its depth, UAR and AUC at the peak,
                              UAR at the last layer
@@ -56,6 +59,7 @@ PANELS = [
     ("Bioacoustic (spectrogram input)",
      ["aves2_eat_all", "aves2_eat_bio"]),
 ]
+PANEL_SLUGS = ["monolingual", "multilingual", "bioacoustic"]
 BASELINE = "ecapa_tdnn"
 INPUT = {m: "waveform" for _, ms in PANELS[:2] for m in ms}
 INPUT.update({"aves2_eat_all": "spectrogram", "aves2_eat_bio": "spectrogram",
@@ -120,51 +124,89 @@ def tables(runs):
     return peaks, long
 
 
-def plot(runs, audio, path):
+YLABEL = "UAR, 18 individuals\n(5-fold by recording, mean of 5 repeats)"
+
+
+def references(runs):
+    """Chance, the ECAPA level, and one y-range shared by EVERY figure, so a
+    standalone panel reads on the same scale as the combined one."""
     chance = runs[BASELINE]["chance_uar"]
     base_uar = runs[BASELINE]["layers"][0]["uar_mean"]
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5.2), sharey=True)
-    for ax, (title, models) in zip(axes, PANELS):
-        for i, m in enumerate(models):
-            j = runs[m]
-            x = [depth(l["layer"], j["n_layers"]) for l in j["layers"]]
-            y = [l["uar_mean"] for l in j["layers"]]
-            ax.plot(x, y, color=SERIES[i], lw=2, label=LABEL[m], zorder=3)
-            k = int(np.argmax(y))
-            # the peak, ringed in the surface colour so it reads on overlap
-            ax.plot(x[k], y[k], marker=MARKERS[i], ms=8, color=SERIES[i],
-                    mec="white", mew=1.5, zorder=4)
-        ax.axhline(base_uar, color=MUTED, lw=1.2, ls="--", zorder=2)
-        ax.axhline(chance, color=MUTED, lw=1, ls=":", zorder=2)
-        ax.set_title(title, fontsize=11, color=INK, pad=8)
-        ax.set_xlim(-3, 103)
-        ax.set_xticks([0, 25, 50, 75, 100])
-        ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
-        ax.grid(axis="y", color=GRID, lw=0.8)
-        ax.set_axisbelow(True)
-        for s in ("top", "right"):
-            ax.spines[s].set_visible(False)
-        ax.tick_params(colors=MUTED, labelsize=9)
-        ax.legend(loc="best", fontsize=8, frameon=False,
-                  labelcolor=INK, handlelength=1.6)
-        ax.set_xlabel("layer depth (0% = first hidden state, 100% = last layer)",
-                      fontsize=9, color=MUTED)
-    # reference-line labels once, at the left edge of the first panel
-    axes[0].text(1, base_uar, f"ECAPA-TDNN {base_uar:.3f}", fontsize=8,
-                 color=MUTED, va="bottom")
-    axes[0].text(1, chance, f"chance {chance:.3f}", fontsize=8,
-                 color=MUTED, va="bottom")
-    axes[0].set_ylabel("UAR, 18 individuals\n(5-fold by recording, mean of 5 repeats)",
-                       fontsize=9, color=MUTED)
     lo = min(chance, base_uar) - 0.03
     hi = max(l["uar_mean"] for j in runs.values() for l in j["layers"]) + 0.05
-    axes[0].set_ylim(max(0, lo), hi)
+    return chance, base_uar, (max(0, lo), hi)
+
+
+def draw_panel(ax, runs, title, models, label_refs, legend_y):
+    chance, base_uar, ylim = references(runs)
+    for i, m in enumerate(models):
+        j = runs[m]
+        x = [depth(l["layer"], j["n_layers"]) for l in j["layers"]]
+        y = [l["uar_mean"] for l in j["layers"]]
+        ax.plot(x, y, color=SERIES[i], lw=2, label=LABEL[m], zorder=3)
+        k = int(np.argmax(y))
+        # the peak, ringed in the surface colour so it reads on overlap
+        ax.plot(x[k], y[k], marker=MARKERS[i], ms=8, color=SERIES[i],
+                mec="white", mew=1.5, zorder=4)
+    ax.axhline(base_uar, color=MUTED, lw=1.2, ls="--", zorder=2)
+    ax.axhline(chance, color=MUTED, lw=1, ls=":", zorder=2)
+    if label_refs:
+        # just outside the right edge, where no data line can cross them
+        tr = ax.get_yaxis_transform()
+        ax.text(1.01, base_uar, f"ECAPA-TDNN\n{base_uar:.3f}", fontsize=8,
+                color=MUTED, va="center", transform=tr)
+        ax.text(1.01, chance, f"chance\n{chance:.3f}", fontsize=8,
+                color=MUTED, va="center", transform=tr)
+    ax.set_title(title, fontsize=11, color=INK, pad=8)
+    ax.set_xlim(-3, 103)
+    ax.set_ylim(*ylim)
+    ax.set_xticks([0, 25, 50, 75, 100])
+    ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
+    ax.grid(axis="y", color=GRID, lw=0.8)
+    ax.set_axisbelow(True)
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
+    ax.tick_params(colors=MUTED, labelsize=9)
+    # below the panel, so it can never sit on a line or a reference level
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, legend_y), ncol=2,
+              fontsize=8.5, frameon=False, labelcolor=INK,
+              handlelength=1.8, columnspacing=1.6)
+    ax.set_xlabel("layer depth (0% = first hidden state, 100% = last layer)",
+                  fontsize=9, color=MUTED)
+
+
+def save(fig, path):
+    # bbox "tight" keeps the below-panel legends inside the saved image
+    fig.savefig(path, dpi=DPI, facecolor="white", bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot(runs, audio, path):
+    fig, axes = plt.subplots(1, 3, figsize=(15, 6.4), sharey=True)
+    for n, (ax, (title, models)) in enumerate(zip(axes, PANELS)):
+        draw_panel(ax, runs, title, models, label_refs=n == len(PANELS) - 1, legend_y=-0.16)
+    axes[0].set_ylabel(YLABEL, fontsize=9, color=MUTED)
     fig.suptitle(f"Hyrax individual ID by layer depth - frozen encoders, "
                  f"{AUDIO_LABEL[audio]}  (marker = peak layer)",
                  fontsize=12, color=INK)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
-    fig.savefig(path, dpi=DPI, facecolor="white")
-    plt.close(fig)
+    save(fig, path)
+
+
+def plot_panels(runs, audio, out_dir):
+    """Each family on its own, same y-scale as the combined figure."""
+    paths = []
+    for (title, models), slug in zip(PANELS, PANEL_SLUGS):
+        fig, ax = plt.subplots(figsize=(7, 5.6))
+        draw_panel(ax, runs, title, models, label_refs=True, legend_y=-0.14)
+        ax.set_ylabel(YLABEL, fontsize=9, color=MUTED)
+        fig.suptitle(f"{AUDIO_LABEL[audio]}  (marker = peak layer)",
+                     fontsize=10, color=MUTED)
+        fig.tight_layout()
+        path = out_dir / f"cv_layers_{audio}_{slug}.png"
+        save(fig, path)
+        paths.append(path)
+    return paths
 
 
 def write_csv(rows, path):
@@ -190,6 +232,7 @@ def main():
         write_csv(peaks, out / f"cv_layer_peaks_{audio}.csv")
         write_csv(long, out / f"cv_layer_curves_{audio}.csv")
         plot(runs, audio, out / f"cv_layers_{audio}.png")
+        plot_panels(runs, audio, out)
         print(f"\n{AUDIO_LABEL[audio]}: peak layer per encoder")
         for p in sorted(peaks, key=lambda r: -r["peak_uar"]):
             print(f"  {p['encoder']:22s} {p['input']:11s} layer {p['peak_layer']:2d}"
