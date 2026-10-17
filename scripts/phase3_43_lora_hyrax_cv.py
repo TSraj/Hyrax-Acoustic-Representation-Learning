@@ -222,8 +222,11 @@ class Encoder:
         # neither sees more context than the other; 14 of 4141 bouts are longer
         self.max_samples = int(10.24 * SAMPLE_RATE)
 
-        adapted = apply_lora(self.model, LORA_TARGETS[self.kind],
-                             args.lora_r, args.lora_alpha)
+        # --no-lora / --freeze-front exist for the WavLM diagnostic only;
+        # the main run uses neither
+        adapted = ([] if args.no_lora else
+                   apply_lora(self.model, LORA_TARGETS[self.kind],
+                              args.lora_r, args.lora_alpha))
 
         for p in self.model.parameters():
             p.requires_grad = False
@@ -237,6 +240,8 @@ class Encoder:
         for name in FRONT_END[self.kind]:
             if name not in modules:
                 raise RuntimeError(f"front-end module '{name}' not found")
+            if args.freeze_front:
+                continue
             for p in modules[name].parameters():
                 p.requires_grad = True
                 self.front_params.append(p)
@@ -251,7 +256,7 @@ class Encoder:
                     f"({sum(p.numel() for p in self.lora_params):,} params)")
         logger.info(f"front end {FRONT_END[self.kind]} trainable "
                     f"({sum(p.numel() for p in self.front_params):,} params)")
-        if n_adapted == 0:
+        if n_adapted == 0 and not args.no_lora:
             raise RuntimeError("LoRA matched no modules")
 
     def pooled_last(self, audios):
@@ -355,11 +360,11 @@ def grad_gate(enc, head, loader, criterion, logger):
     leaked = [n for n, p in named if not p.requires_grad and p.grad is not None]
     head_ok = all(p.grad is not None for p in head.parameters())
     logger.info(f"gradient gate: adapters {len(live)}/{len(adapters)} live, "
-                f"front end {'live' if front > 0 else 'DEAD'}, "
+                f"front end {'frozen' if not enc.front_params else 'live' if front > 0 else 'DEAD'}, "
                 f"frozen leaks {len(leaked)}, head {'live' if head_ok else 'DEAD'}")
     enc.model.zero_grad(set_to_none=True)
     head.zero_grad(set_to_none=True)
-    if live != adapters or front == 0 or leaked or not head_ok:
+    if live != adapters or (enc.front_params and front == 0) or leaked or not head_ok:
         raise RuntimeError("gradient gate FAILED -- refusing to train")
 
 
@@ -432,11 +437,15 @@ def train_fold(args, logger, k, timing=False):
     head = nn.Linear(enc.hidden, C).to(enc.device)
     w = class_weights_for(y[tr], C)
     criterion = nn.CrossEntropyLoss(weight=w.to(enc.device))
-    groups_opt = [{"params": enc.lora_params, "lr": args.lr_lora},
+    groups_opt = [g for g in [{"params": enc.lora_params, "lr": args.lr_lora},
                   {"params": enc.front_params, "lr": args.lr_front},
                   {"params": list(head.parameters()), "lr": args.lr_head}]
+                 if g["params"]]
     params = [p for g in groups_opt for p in g["params"]]
     optimizer = optim.AdamW(groups_opt)
+    logger.info("optimiser groups: " + ", ".join(
+        f"{sum(p.numel() for p in g['params']):,} params @ lr {g['lr']}"
+        for g in groups_opt))
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="max", factor=0.5, patience=args.lr_patience)
 
@@ -510,8 +519,11 @@ def train_fold(args, logger, k, timing=False):
     logger.info(f"fold {k} TEST end-to-end: UAR {e2e['uar']:.4f}  "
                 f"AUC {e2e.get('auc_macro_ovr')}  F1 {e2e['f1_macro']:.4f}")
 
-    layer_rows, layer_probs = probe_layers(args, logger, enc, items, y, groups,
-                                           tr_all, te, C, classes)
+    if args.skip_probe:
+        layer_rows, layer_probs = [], np.zeros((0, len(te), C))
+    else:
+        layer_rows, layer_probs = probe_layers(args, logger, enc, items, y, groups,
+                                               tr_all, te, C, classes)
 
     np.savez_compressed(
         out / "probs.npz",
@@ -697,7 +709,8 @@ def config_of(args):
     return {k: getattr(args, k) for k in (
         "lora_r", "lora_alpha", "lr_lora", "lr_front", "lr_head",
         "batch_size", "max_epochs", "patience", "lr_patience", "val_frac",
-        "grad_clip", "probe_seeds", "probe_steps", "probe_patience", "seed")} | {
+        "grad_clip", "probe_seeds", "probe_steps", "probe_patience", "seed",
+        "no_lora", "freeze_front", "skip_probe")} | {
         "lora_targets": "attention projections, every block",
         "lora_mechanism": "weight parametrization (W + BA*alpha/r), no dropout",
         "front_end_trained": True,
@@ -721,6 +734,12 @@ def main():
     p.add_argument("--limit-items", type=int, default=None,
                    help="smoke tests only: random subset of bouts")
     p.add_argument("--force", action="store_true")
+    # WavLM diagnostic only (run_phase3_lora_wavlm_diag.sh)
+    p.add_argument("--no-lora", action="store_true",
+                   help="no adapters: train the head (and front end, unless frozen)")
+    p.add_argument("--freeze-front", action="store_true")
+    p.add_argument("--skip-probe", action="store_true",
+                   help="skip the per-layer probe after training")
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
     p.add_argument("--lr-lora", type=float, default=1e-4)
