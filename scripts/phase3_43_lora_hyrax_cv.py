@@ -213,6 +213,7 @@ class Encoder:
 
     def __init__(self, model_name, args, logger):
         self.kind = "avex" if model_name in AVEX_MODELS else "hf"
+        self.encoder_eval = getattr(args, "encoder_eval", False)
         self.ex = build_extractor(model_name, None, logger,
                                   batch_size=args.embed_batch_size)
         self.model = self.ex.model
@@ -297,7 +298,12 @@ class Encoder:
         return torch.cat(pooled, dim=0)
 
     def train(self):
-        self.model.train()
+        # --encoder-eval: the encoder stays in eval mode while it trains, so
+        # dropout and (WavLM) SpecAugment are off; gradients flow regardless
+        if self.encoder_eval:
+            self.model.eval()
+        else:
+            self.model.train()
 
     def eval(self):
         self.model.eval()
@@ -707,7 +713,7 @@ def config_of(args):
         "lora_r", "lora_alpha", "lr_lora", "lr_front", "lr_head",
         "batch_size", "max_epochs", "patience", "lr_patience", "val_frac",
         "grad_clip", "probe_seeds", "probe_steps", "probe_patience", "seed",
-        "no_lora", "freeze_front", "skip_probe")} | {
+        "no_lora", "freeze_front", "skip_probe", "encoder_eval")} | {
         "lora_targets": "attention projections, every block",
         "lora_mechanism": "weight parametrization (W + BA*alpha/r), no dropout",
         "front_end_trained": True,
@@ -735,6 +741,9 @@ def main():
     p.add_argument("--no-lora", action="store_true",
                    help="no adapters: train the head (and front end, unless frozen)")
     p.add_argument("--freeze-front", action="store_true")
+    p.add_argument("--encoder-eval", action="store_true",
+                   help="train with the encoder in eval mode: no dropout, "
+                        "no SpecAugment")
     p.add_argument("--skip-probe", action="store_true",
                    help="skip the per-layer probe after training")
     p.add_argument("--lora-r", type=int, default=16)

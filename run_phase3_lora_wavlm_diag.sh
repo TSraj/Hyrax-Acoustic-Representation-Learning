@@ -46,7 +46,7 @@ export HF_HOME=${HF_HOME:-$WORK/hf_cache/huggingface}
 export HF_HUB_DISABLE_XET=${HF_HUB_DISABLE_XET:-1}
 
 echo "=============================================================="
-echo "WavLM Large DIAGNOSTIC round 2 - fold 0, 8 epochs, head only"
+echo "WavLM Large DIAGNOSTIC round 3 - fold 0, 8 epochs, A3 + D"
 echo "=============================================================="
 echo "output    : $OUT  (separate from lora_hyrax_cv)"
 echo "node      : $(hostname)"
@@ -82,10 +82,19 @@ run_variant() {
 # A (frozen encoder, head only) reached only 0.15 test UAR against ~0.38 for
 # the frozen probe, so the training path itself was wrong, not the LR. It now
 # embeds one bout per forward pass, matching the frozen extractor exactly.
-# ROUND 2 re-runs A only, into a NEW folder; round 1's folders stay as they are.
-run_variant A2_head_only_unbatched --no-lora --freeze-front
+# ROUND 2 (job 1841837) re-ran A with one bout per pass: test UAR 0.159, no
+# change -- padding was not the cause.
+# ROUND 3: the encoder stays in EVAL mode while training (--encoder-eval), so
+# WavLM's dropout and SpecAugment are off -- the frozen probe never sees them.
+#   A3  head only, encoder in eval mode. ~0.38 here means train-mode noise
+#       was the cause.
+#   D   LoRA + front end at the main run's learning rates, encoder in eval
+#       mode: the candidate fix. Only the training noise differs from the run.
+# New folders; rounds 1 and 2 stay as they are.
+run_variant A3_head_only_eval_mode --no-lora --freeze-front --encoder-eval
+run_variant D_lora_eval_mode --encoder-eval
 
 echo ""
 echo "finished  : $(date)"
-echo "reference : round 1 head only (padded batches): val UAR 0.12-0.21, test 0.154;"
+echo "reference : head only in TRAIN mode (rounds 1-2): val UAR 0.12-0.21, test ~0.16;"
 echo "            frozen last-layer probe UAR is ~0.38"
