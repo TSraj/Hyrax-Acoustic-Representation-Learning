@@ -46,7 +46,7 @@ export HF_HOME=${HF_HOME:-$WORK/hf_cache/huggingface}
 export HF_HUB_DISABLE_XET=${HF_HUB_DISABLE_XET:-1}
 
 echo "=============================================================="
-echo "WavLM Large DIAGNOSTIC - fold 0, 8 epochs, 3 variants"
+echo "WavLM Large DIAGNOSTIC round 2 - fold 0, 8 epochs, head only"
 echo "=============================================================="
 echo "output    : $OUT  (separate from lora_hyrax_cv)"
 echo "node      : $(hostname)"
@@ -78,11 +78,14 @@ run_variant() {
         "$@"
 }
 
-run_variant A_head_only         --no-lora --freeze-front
-run_variant B_low_lr            --lr-lora 2e-5 --lr-front 2e-6
-run_variant C_low_lr_frozen_front --lr-lora 2e-5 --freeze-front
+# ROUND 1 (job 1841775) ran A, B and C with the PADDED-BATCH training path.
+# A (frozen encoder, head only) reached only 0.15 test UAR against ~0.38 for
+# the frozen probe, so the training path itself was wrong, not the LR. It now
+# embeds one bout per forward pass, matching the frozen extractor exactly.
+# ROUND 2 re-runs A only, into a NEW folder; round 1's folders stay as they are.
+run_variant A2_head_only_unbatched --no-lora --freeze-front
 
 echo ""
 echo "finished  : $(date)"
-echo "reference : full run fold 0 had val UAR 0.12-0.15, test UAR 0.106;"
+echo "reference : round 1 head only (padded batches): val UAR 0.12-0.21, test 0.154;"
 echo "            frozen last-layer probe UAR is ~0.38"

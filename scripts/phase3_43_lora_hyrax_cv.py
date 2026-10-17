@@ -278,26 +278,23 @@ class Encoder:
             self.ex._captured.clear()
             return out
 
+        # ONE BOUT PER FORWARD PASS, exactly as the frozen extractor does
+        # (phase3_24.LayerExtractor.embed_all_layers). The first version
+        # padded a batch to its longest bout and masked the padding. That is
+        # not equivalent: with padding the embedding of the same bout drifted
+        # from the frozen one (cosine down to 0.98 on WavLM Base+), and on
+        # WavLM Large a head trained on a FROZEN encoder this way reached only
+        # 0.15 test UAR where the frozen probe gets ~0.38. One bout at a time
+        # matches the frozen embedding exactly (cosine 1.0000). The loss is
+        # still computed over the whole batch, so only the forward is split.
         fe = self.ex.feature_extractor
-        lengths = torch.LongTensor([len(a) for a in audios])
-        # normalised at the TRUE length, then padded -- as the frozen
-        # extractor normalises each bout on its own
-        normed = [fe(a, sampling_rate=SAMPLE_RATE, return_tensors="np")
-                  ["input_values"][0] for a in audios]
-        x = np.zeros((len(normed), int(lengths.max())), dtype=np.float32)
-        for i, a in enumerate(normed):
-            x[i, :len(a)] = a
-        x = torch.from_numpy(x).to(self.device)
-        inputs = {"input_values": x}
-        if fe.return_attention_mask:
-            pos = torch.arange(x.size(1), device=self.device)
-            inputs["attention_mask"] = (pos[None] < lengths.to(self.device)[:, None]).long()
-        h = self.model(**inputs).last_hidden_state
-        n = torch.as_tensor(self.model._get_feat_extract_output_lengths(lengths),
-                            device=self.device).long().clamp(max=h.size(1))
-        mask = (torch.arange(h.size(1), device=self.device)[None] < n[:, None])
-        mask = mask.unsqueeze(-1).to(h.dtype)
-        return (h * mask).sum(1) / mask.sum(1).clamp(min=1.0)
+        pooled = []
+        for a in audios:
+            inputs = fe(a, sampling_rate=SAMPLE_RATE, return_tensors="pt",
+                        padding=True)
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            pooled.append(self.model(**inputs).last_hidden_state.mean(dim=1))
+        return torch.cat(pooled, dim=0)
 
     def train(self):
         self.model.train()
